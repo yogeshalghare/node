@@ -307,6 +307,8 @@ class V8_NODISCARD AsyncWaiterQueueNode final : public WaiterQueueNode {
     return internal_waiting_promise;
   }
 
+  bool IsEmpty() const { return synchronization_primitive_.IsEmpty(); }
+
   Handle<T> GetSynchronizationPrimitive() {
     v8::Isolate* v8_isolate = reinterpret_cast<v8::Isolate*>(requester_);
     Handle<T> synchronization_primitive =
@@ -533,6 +535,12 @@ void JSAtomicsMutex::CleanupMatchingAsyncWaiters(Isolate* isolate,
     // any other matching nodes and mark them as ready for async cleanup. This
     // way we avoid taking the queue lock multiple times, which could slow down
     // other threads.
+    return;
+  }
+  if (async_node->IsEmpty()) {
+    // The node's underlying synchronization primitive has been collected, so
+    // delete it.
+    async_node->SetNotInListForVerification();
     return;
   }
   DirectHandle<JSAtomicsMutex> mutex =
@@ -947,7 +955,24 @@ void JSAtomicsMutex::UnlockAsyncLockedMutex(
           async_locked_waiter_wrapper->foreign_address<kWaiterQueueForeignTag>(
               IsolateForSandbox(requester)));
   LockAsyncWaiterQueueNode::RemoveFromAsyncWaiterQueueList(waiter_node);
-  Unlock(requester);
+  if (IsCurrentThreadOwner()) {
+    Unlock(requester);
+    return;
+  }
+  // If this is reached, the lock was already released by this thread.
+  // This can happen if waitAsync is called without awaiting or due to
+  // promise prototype tampering. Setting Promise.prototype.then to a
+  // non callable will cause the `waiting_for_callback_promise` (defined in
+  // LockOrEnqueuePromise) reactions to be called even if the async callback
+  // is not resolved; as a consequence, the following code will try to unlock
+  // the mutex twice:
+  //
+  // let mutex = new Atomics.Mutex();
+  // let cv = new Atomics.Condition();
+  // Promise.prototype.then = undefined;
+  // Atomics.Mutex.lockAsync(mutex, async function() {
+  //   await Atomics.Condition.waitAsync(cv, mutex);
+  // }
 }
 
 bool JSAtomicsMutex::DequeueTimedOutAsyncWaiter(
@@ -1099,7 +1124,13 @@ void JSAtomicsCondition::CleanupMatchingAsyncWaiters(Isolate* isolate,
   auto* async_node = static_cast<WaitAsyncWaiterQueueNode*>(node);
   if (async_node->ready_for_async_cleanup_) {
     // The node is not in the waiter queue and there is no HandleNotify task
-    // for it in the event loop. So it is safe to delete the it.
+    // for it in the event loop. So it is safe to delete it.
+    return;
+  }
+  if (async_node->IsEmpty()) {
+    // The node's underlying synchronization primitive has been collected, so
+    // delete it.
+    async_node->SetNotInListForVerification();
     return;
   }
   DirectHandle<JSAtomicsCondition> cv =
@@ -1109,8 +1140,7 @@ void JSAtomicsCondition::CleanupMatchingAsyncWaiters(Isolate* isolate,
 
   WaiterQueueLockGuard waiter_queue_lock_guard(state, current_state);
 
-  WaiterQueueNode* waiter_head =
-      cv->DestructivelyGetWaiterQueueHead(cv->GetIsolate());
+  WaiterQueueNode* waiter_head = cv->DestructivelyGetWaiterQueueHead(isolate);
   if (waiter_head) {
     WaiterQueueNode::DequeueAllMatchingForAsyncCleanup(&waiter_head, matcher);
   }

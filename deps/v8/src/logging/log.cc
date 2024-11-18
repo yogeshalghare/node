@@ -30,6 +30,7 @@
 #include "src/handles/global-handles.h"
 #include "src/heap/combined-heap.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/init/bootstrapper.h"
 #include "src/interpreter/bytecodes.h"
 #include "src/interpreter/interpreter.h"
@@ -56,6 +57,7 @@
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-code-manager.h"
 #include "src/wasm/wasm-engine.h"
+#include "src/wasm/wasm-import-wrapper-cache.h"
 #include "src/wasm/wasm-objects-inl.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
@@ -189,13 +191,12 @@ class CodeEventLogger::NameBuffer {
 
   void AppendString(Tagged<String> str) {
     if (str.is_null()) return;
-    int length = 0;
-    std::unique_ptr<char[]> c_str =
-        str->ToCString(DISALLOW_NULLS, ROBUST_STRING_TRAVERSAL, &length);
+    size_t length = 0;
+    std::unique_ptr<char[]> c_str = str->ToCString(&length);
     AppendBytes(c_str.get(), length);
   }
 
-  void AppendBytes(const char* bytes, int size) {
+  void AppendBytes(const char* bytes, size_t size) {
     size = std::min(size, kUtf8BufferSize - utf8_pos_);
     MemCopy(utf8_buffer_ + utf8_pos_, bytes, size);
     utf8_pos_ += size;
@@ -213,8 +214,8 @@ class CodeEventLogger::NameBuffer {
   }
 
   void AppendInt(int n) {
-    int space = kUtf8BufferSize - utf8_pos_;
-    if (space <= 0) return;
+    if (utf8_pos_ >= kUtf8BufferSize) return;
+    size_t space = kUtf8BufferSize - utf8_pos_;
     base::Vector<char> buffer(utf8_buffer_ + utf8_pos_, space);
     int size = SNPrintF(buffer, "%d", n);
     if (size > 0 && utf8_pos_ + size <= kUtf8BufferSize) {
@@ -223,8 +224,8 @@ class CodeEventLogger::NameBuffer {
   }
 
   void AppendHex(uint32_t n) {
-    int space = kUtf8BufferSize - utf8_pos_;
-    if (space <= 0) return;
+    if (utf8_pos_ >= kUtf8BufferSize) return;
+    size_t space = kUtf8BufferSize - utf8_pos_;
     base::Vector<char> buffer(utf8_buffer_ + utf8_pos_, space);
     int size = SNPrintF(buffer, "%x", n);
     if (size > 0 && utf8_pos_ + size <= kUtf8BufferSize) {
@@ -233,13 +234,13 @@ class CodeEventLogger::NameBuffer {
   }
 
   const char* get() { return utf8_buffer_; }
-  int size() const { return utf8_pos_; }
+  size_t size() const { return utf8_pos_; }
 
  private:
-  static const int kUtf8BufferSize = 4096;
-  static const int kUtf16BufferSize = kUtf8BufferSize;
+  static const size_t kUtf8BufferSize = 4096;
+  static const size_t kUtf16BufferSize = kUtf8BufferSize;
 
-  int utf8_pos_;
+  size_t utf8_pos_;
   char utf8_buffer_[kUtf8BufferSize];
 };
 
@@ -327,10 +328,21 @@ void CodeEventLogger::CodeCreateEvent(CodeTag tag, const wasm::WasmCode* code,
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void CodeEventLogger::RegExpCodeCreateEvent(Handle<AbstractCode> code,
-                                            Handle<String> source) {
+                                            Handle<String> source,
+                                            RegExpFlags flags) {
   DCHECK(is_listening_to_code_events());
-  name_buffer_->Init(LogEventListener::CodeTag::kRegExp);
+  // Note we don't call Init due to the required pprof demangling hack for
+  // regexp patterns.
+  name_buffer_->Reset();
+  // https://github.com/google/pprof/blob/4cf4322d492d108a9d6526d10844e04792982cbb/internal/symbolizer/symbolizer.go#L312.
+  name_buffer_->AppendBytes("RegExp.>");
+  name_buffer_->AppendBytes(" src: '");
   name_buffer_->AppendString(*source);
+  name_buffer_->AppendBytes("' flags: '");
+  Handle<String> flags_str =
+      JSRegExp::StringFromFlags(isolate_, JSRegExp::AsJSRegExpFlags(flags));
+  name_buffer_->AppendString(*flags_str);
+  name_buffer_->AppendBytes("'");
   DisallowGarbageCollection no_gc;
   LogRecordedBuffer(*code, MaybeHandle<SharedFunctionInfo>(),
                     name_buffer_->get(), name_buffer_->size());
@@ -353,13 +365,13 @@ class LinuxPerfBasicLogger : public CodeEventLogger {
  private:
   void LogRecordedBuffer(Tagged<AbstractCode> code,
                          MaybeHandle<SharedFunctionInfo> maybe_shared,
-                         const char* name, int length) override;
+                         const char* name, size_t length) override;
 #if V8_ENABLE_WEBASSEMBLY
   void LogRecordedBuffer(const wasm::WasmCode* code, const char* name,
-                         int length) override;
+                         size_t length) override;
 #endif  // V8_ENABLE_WEBASSEMBLY
-  void WriteLogRecordedBuffer(uintptr_t address, int size, const char* name,
-                              int name_length);
+  void WriteLogRecordedBuffer(uintptr_t address, size_t size, const char* name,
+                              size_t name_length);
 
   static base::LazyRecursiveMutex& GetFileMutex();
 
@@ -422,9 +434,9 @@ LinuxPerfBasicLogger::~LinuxPerfBasicLogger() {
   }
 }
 
-void LinuxPerfBasicLogger::WriteLogRecordedBuffer(uintptr_t address, int size,
-                                                  const char* name,
-                                                  int name_length) {
+void LinuxPerfBasicLogger::WriteLogRecordedBuffer(uintptr_t address,
+                                                  size_t size, const char* name,
+                                                  size_t name_length) {
   // Linux perf expects hex literals without a leading 0x, while some
   // implementations of printf might prepend one when using the %p format
   // for pointers, leading to wrongly formatted JIT symbols maps. On the other
@@ -432,18 +444,19 @@ void LinuxPerfBasicLogger::WriteLogRecordedBuffer(uintptr_t address, int size,
   //
   // Instead, we use V8PRIxPTR format string and cast pointer to uintpr_t,
   // so that we have control over the exact output format.
+  int int_name_length = static_cast<int>(name_length);
 #ifdef V8_OS_ANDROID
-  base::OS::FPrint(perf_output_handle_, "0x%" V8PRIxPTR " 0x%x %.*s\n", address,
-                   size, name_length, name);
+  base::OS::FPrint(perf_output_handle_, "0x%" V8PRIxPTR " 0x%zx %.*s\n",
+                   address, size, int_name_length, name);
 #else
-  base::OS::FPrint(perf_output_handle_, "%" V8PRIxPTR " %x %.*s\n", address,
-                   size, name_length, name);
+  base::OS::FPrint(perf_output_handle_, "%" V8PRIxPTR " %zx %.*s\n", address,
+                   size, int_name_length, name);
 #endif
 }
 
 void LinuxPerfBasicLogger::LogRecordedBuffer(Tagged<AbstractCode> code,
                                              MaybeHandle<SharedFunctionInfo>,
-                                             const char* name, int length) {
+                                             const char* name, size_t length) {
   DisallowGarbageCollection no_gc;
   PtrComprCageBase cage_base(isolate_);
   if (v8_flags.perf_basic_prof_only_functions &&
@@ -458,7 +471,7 @@ void LinuxPerfBasicLogger::LogRecordedBuffer(Tagged<AbstractCode> code,
 
 #if V8_ENABLE_WEBASSEMBLY
 void LinuxPerfBasicLogger::LogRecordedBuffer(const wasm::WasmCode* code,
-                                             const char* name, int length) {
+                                             const char* name, size_t length) {
   WriteLogRecordedBuffer(static_cast<uintptr_t>(code->instruction_start()),
                          code->instructions().length(), name, length);
 }
@@ -599,7 +612,8 @@ void ExternalLogEventListener::CodeCreateEvent(CodeTag tag,
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void ExternalLogEventListener::RegExpCodeCreateEvent(Handle<AbstractCode> code,
-                                                     Handle<String> source) {
+                                                     Handle<String> source,
+                                                     RegExpFlags flags) {
   PtrComprCageBase cage_base(isolate_);
   CodeEvent code_event;
   code_event.code_start_address =
@@ -670,10 +684,10 @@ class LowLevelLogger : public CodeEventLogger {
  private:
   void LogRecordedBuffer(Tagged<AbstractCode> code,
                          MaybeHandle<SharedFunctionInfo> maybe_shared,
-                         const char* name, int length) override;
+                         const char* name, size_t length) override;
 #if V8_ENABLE_WEBASSEMBLY
   void LogRecordedBuffer(const wasm::WasmCode* code, const char* name,
-                         int length) override;
+                         size_t length) override;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   // Low-level profiling event structures.
@@ -698,7 +712,7 @@ class LowLevelLogger : public CodeEventLogger {
   static const char kLogExt[];
 
   void LogCodeInfo();
-  void LogWriteBytes(const char* bytes, int size);
+  void LogWriteBytes(const char* bytes, size_t size);
 
   template <typename T>
   void LogWriteStruct(const T& s) {
@@ -738,16 +752,14 @@ void LowLevelLogger::LogCodeInfo() {
   const char arch[] = "x64";
 #elif V8_TARGET_ARCH_ARM
   const char arch[] = "arm";
-#elif V8_TARGET_ARCH_PPC
-  const char arch[] = "ppc";
 #elif V8_TARGET_ARCH_PPC64
   const char arch[] = "ppc64";
 #elif V8_TARGET_ARCH_LOONG64
   const char arch[] = "loong64";
 #elif V8_TARGET_ARCH_ARM64
   const char arch[] = "arm64";
-#elif V8_TARGET_ARCH_S390
-  const char arch[] = "s390";
+#elif V8_TARGET_ARCH_S390X
+  const char arch[] = "s390x";
 #elif V8_TARGET_ARCH_RISCV64
   const char arch[] = "riscv64";
 #elif V8_TARGET_ARCH_RISCV32
@@ -760,11 +772,11 @@ void LowLevelLogger::LogCodeInfo() {
 
 void LowLevelLogger::LogRecordedBuffer(Tagged<AbstractCode> code,
                                        MaybeHandle<SharedFunctionInfo>,
-                                       const char* name, int length) {
+                                       const char* name, size_t length) {
   DisallowGarbageCollection no_gc;
   PtrComprCageBase cage_base(isolate_);
   CodeCreateStruct event;
-  event.name_size = length;
+  event.name_size = static_cast<uint32_t>(length);
   event.code_address = code->InstructionStart(cage_base);
   event.code_size = code->InstructionSize(cage_base);
   LogWriteStruct(event);
@@ -776,9 +788,9 @@ void LowLevelLogger::LogRecordedBuffer(Tagged<AbstractCode> code,
 
 #if V8_ENABLE_WEBASSEMBLY
 void LowLevelLogger::LogRecordedBuffer(const wasm::WasmCode* code,
-                                       const char* name, int length) {
+                                       const char* name, size_t length) {
   CodeCreateStruct event;
-  event.name_size = length;
+  event.name_size = static_cast<uint32_t>(length);
   event.code_address = code->instruction_start();
   event.code_size = code->instructions().length();
   LogWriteStruct(event);
@@ -804,9 +816,9 @@ void LowLevelLogger::BytecodeMoveEvent(Tagged<BytecodeArray> from,
   LogWriteStruct(event);
 }
 
-void LowLevelLogger::LogWriteBytes(const char* bytes, int size) {
+void LowLevelLogger::LogWriteBytes(const char* bytes, size_t size) {
   size_t rv = fwrite(bytes, 1, size, ll_output_handle_);
-  DCHECK(static_cast<size_t>(size) == rv);
+  DCHECK_EQ(size, rv);
   USE(rv);
 }
 
@@ -838,10 +850,10 @@ class JitLogger : public CodeEventLogger {
  private:
   void LogRecordedBuffer(Tagged<AbstractCode> code,
                          MaybeHandle<SharedFunctionInfo> maybe_shared,
-                         const char* name, int length) override;
+                         const char* name, size_t length) override;
 #if V8_ENABLE_WEBASSEMBLY
   void LogRecordedBuffer(const wasm::WasmCode* code, const char* name,
-                         int length) override;
+                         size_t length) override;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   JitCodeEventHandler code_event_handler_;
@@ -855,7 +867,7 @@ JitLogger::JitLogger(Isolate* isolate, JitCodeEventHandler code_event_handler)
 
 void JitLogger::LogRecordedBuffer(Tagged<AbstractCode> code,
                                   MaybeHandle<SharedFunctionInfo> maybe_shared,
-                                  const char* name, int length) {
+                                  const char* name, size_t length) {
   DisallowGarbageCollection no_gc;
   PtrComprCageBase cage_base(isolate_);
   JitCodeEvent event;
@@ -879,7 +891,7 @@ void JitLogger::LogRecordedBuffer(Tagged<AbstractCode> code,
 
 #if V8_ENABLE_WEBASSEMBLY
 void JitLogger::LogRecordedBuffer(const wasm::WasmCode* code, const char* name,
-                                  int length) {
+                                  size_t length) {
   JitCodeEvent event;
   event.type = JitCodeEvent::CODE_ADDED;
   event.code_type = JitCodeEvent::WASM_CODE;
@@ -1234,7 +1246,7 @@ template <StateTag tag>
 class VMStateIfMainThread {
  public:
   explicit VMStateIfMainThread(Isolate* isolate) {
-    if (isolate->IsCurrent()) {
+    if (ThreadId::Current() == isolate->thread_id()) {
       vm_state_.emplace(isolate);
     }
   }
@@ -1546,8 +1558,10 @@ void V8FileLogger::FeedbackVectorEvent(Tagged<FeedbackVector> vector,
       << vector->length();
   msg << kNext << reinterpret_cast<void*>(code->InstructionStart(cage_base));
   msg << kNext << vector->tiering_state();
+#ifndef V8_ENABLE_LEAPTIERING
   msg << kNext << vector->maybe_has_maglev_code();
   msg << kNext << vector->maybe_has_turbofan_code();
+#endif  // !V8_ENABLE_LEAPTIERING
   msg << kNext << vector->invocation_count();
 
 #ifdef OBJECT_PRINT
@@ -1603,10 +1617,14 @@ void V8FileLogger::CodeCreateEvent(CodeTag tag, const wasm::WasmCode* code,
   // We have to add two extra fields that allow the tick processor to group
   // events for the same wasm function, even if it gets compiled again. For
   // normal JS functions, we use the shared function info. For wasm, the pointer
-  // to the native module + function index works well enough.
+  // to the native module + function index works well enough. For Wasm wrappers,
+  // just use the address of the WasmCode.
   // TODO(herhut) Clean up the tick processor code instead.
-  void* tag_ptr =
-      reinterpret_cast<uint8_t*>(code->native_module()) + code->index();
+  const void* tag_ptr =
+      code->native_module() != nullptr
+          ? reinterpret_cast<uint8_t*>(code->native_module()) + code->index()
+          : reinterpret_cast<const uint8_t*>(code);
+
   msg << kNext << tag_ptr << kNext << ComputeMarker(code);
   msg.WriteToLogFile();
 }
@@ -1637,7 +1655,8 @@ void V8FileLogger::SetterCallbackEvent(Handle<Name> name, Address entry_point) {
 }
 
 void V8FileLogger::RegExpCodeCreateEvent(Handle<AbstractCode> code,
-                                         Handle<String> source) {
+                                         Handle<String> source,
+                                         RegExpFlags flags) {
   if (!is_listening_to_code_events()) return;
   if (!v8_flags.log_code) return;
   VMStateIfMainThread<LOGGING> state(isolate_);
@@ -2103,15 +2122,6 @@ EnumerateCompiledFunctions(Heap* heap) {
       if (function->HasAttachedOptimizedCode(isolate) &&
           Cast<Script>(function->shared()->script())->HasValidSource()) {
         record(function->shared(), Cast<AbstractCode>(function->code(isolate)));
-#if V8_ENABLE_WEBASSEMBLY
-      } else if (WasmJSFunction::IsWasmJSFunction(function)) {
-        Tagged<WasmInternalFunction> internal_function =
-            function->shared()->wasm_js_function_data()->internal();
-        Tagged<WasmImportData> import_data =
-            Cast<WasmImportData>(internal_function->implicit_arg());
-        record(function->shared(),
-               Cast<AbstractCode>(import_data->code(isolate)));
-#endif  // V8_ENABLE_WEBASSEMBLY
       }
     }
   }
@@ -2482,7 +2492,7 @@ void ExistingCodeLogger::LogCodeObject(Tagged<AbstractCode> object) {
   PtrComprCageBase cage_base(isolate_);
   switch (abstract_code->kind(cage_base)) {
     case CodeKind::INTERPRETED_FUNCTION:
-    case CodeKind::TURBOFAN:
+    case CodeKind::TURBOFAN_JS:
     case CodeKind::BASELINE:
     case CodeKind::MAGLEV:
       return;  // We log this later using LogCompiledFunctions.
@@ -2598,7 +2608,7 @@ void ExistingCodeLogger::LogCompiledFunctions(
     // objects are also in trusted space. Currently this breaks because we must
     // not compare objects in trusted space with ones inside the sandbox.
     static_assert(!kAllCodeObjectsLiveInTrustedSpace);
-    if (!IsTrustedSpaceObject(*pair.second) &&
+    if (!HeapLayout::InTrustedSpace(*pair.second) &&
         pair.second.is_identical_to(BUILTIN_CODE(isolate_, CompileLazy))) {
       continue;
     }
@@ -2616,6 +2626,7 @@ void ExistingCodeLogger::LogCompiledFunctions(
     module_object->native_module()->LogWasmCodes(isolate_,
                                                  module_object->script());
   }
+  wasm::GetWasmImportWrapperCache()->LogForIsolate(isolate_);
 #endif  // V8_ENABLE_WEBASSEMBLY
 }
 

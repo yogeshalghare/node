@@ -16,7 +16,6 @@
 #include "src/compiler/allocation-builder.h"
 #include "src/compiler/common-operator.h"
 #include "src/compiler/compilation-dependencies.h"
-#include "src/compiler/const-tracking-let-helpers.h"
 #include "src/compiler/frame-states.h"
 #include "src/compiler/graph-assembler.h"
 #include "src/compiler/js-graph.h"
@@ -32,6 +31,7 @@
 #include "src/flags/flags.h"
 #include "src/handles/handles.h"
 #include "src/heap/factory.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/elements-kind.h"
 #include "src/objects/feedback-vector.h"
@@ -379,8 +379,8 @@ Handle<String> JSNativeContextSpecialization::Concatenate(
     // build a SeqString rather than a ConsString, regardless of {length}.
     // TODO(dmercadier, dinfuehr): always build a ConsString here once the
     // generational write-barrier supports background threads.
-    if (!LocalHeap::Current() ||
-        (!ObjectInYoungGeneration(*left) && !ObjectInYoungGeneration(*right))) {
+    if (!LocalHeap::Current() || (!HeapLayout::InYoungGeneration(*left) &&
+                                  !HeapLayout::InYoungGeneration(*right))) {
       return broker()
           ->local_isolate_or_isolate()
           ->factory()
@@ -484,8 +484,8 @@ Reduction JSNativeContextSpecialization::ReduceJSAdd(Node* node) {
       // One of {lhs} or {rhs} is not safe to be read in the background.
 
       if (left->length() + right->length() > ConsString::kMinLength &&
-          (!LocalHeap::Current() || (!ObjectInYoungGeneration(*left) &&
-                                     !ObjectInYoungGeneration(*right)))) {
+          (!LocalHeap::Current() || (!HeapLayout::InYoungGeneration(*left) &&
+                                     !HeapLayout::InYoungGeneration(*right)))) {
         // We can create a ConsString with {left} and {right}, without needing
         // to read their content (and this ConsString will not introduce
         // old-to-new pointers from the background).
@@ -776,7 +776,7 @@ Reduction JSNativeContextSpecialization::ReduceJSInstanceOf(Node* node) {
 
     // Check that {constructor} is actually {receiver}.
     constructor = access_builder.BuildCheckValue(constructor, &effect, control,
-                                                 receiver->object());
+                                                 *receiver);
 
     // Monomorphic property access.
     access_builder.BuildCheckMaps(constructor, &effect, control,
@@ -1317,13 +1317,20 @@ Reduction JSNativeContextSpecialization::ReduceJSLoadGlobal(Node* node) {
   GlobalAccessFeedback const& feedback = processed.AsGlobalAccess();
   if (feedback.IsScriptContextSlot()) {
     Effect effect = n.effect();
+    Control control = n.control();
     Node* script_context =
         jsgraph()->ConstantNoHole(feedback.script_context(), broker());
-    Node* value = effect =
-        graph()->NewNode(javascript()->LoadContext(0, feedback.slot_index(),
-                                                   feedback.immutable()),
-                         script_context, effect);
-    ReplaceWithValue(node, value, effect);
+    Node* value;
+    if (feedback.immutable()) {
+      value = effect = graph()->NewNode(
+          javascript()->LoadContext(0, feedback.slot_index(), true),
+          script_context, effect);
+    } else {
+      value = effect = graph()->NewNode(
+          javascript()->LoadScriptContext(0, feedback.slot_index()),
+          script_context, effect, control);
+    }
+    ReplaceWithValue(node, value, effect, control);
     return Replace(value);
   } else if (feedback.IsPropertyCell()) {
     return ReduceGlobalAccess(node, nullptr, nullptr, nullptr, p.name(),
@@ -1352,21 +1359,9 @@ Reduction JSNativeContextSpecialization::ReduceJSStoreGlobal(Node* node) {
     Node* control = n.control();
     Node* script_context =
         jsgraph()->ConstantNoHole(feedback.script_context(), broker());
-
-    // StoreGlobal can store to `let` variables declared by another script.
-    // Thus, we must check the const tracking let side data and potentially
-    // invalidate the constness.
-    if (v8_flags.const_tracking_let) {
-      int side_data_index =
-          ConstTrackingLetSideDataIndexForAccess(feedback.slot_index());
-      GenerateCheckConstTrackingLetSideData(script_context, &effect, &control,
-                                            side_data_index, jsgraph_);
-      // If we're still here (not deopted) the side data implied that the
-      // variable was already not-a-constant, so we can just store into it.
-    }
-    effect =
-        graph()->NewNode(javascript()->StoreContext(0, feedback.slot_index()),
-                         value, script_context, effect, control);
+    effect = control = graph()->NewNode(
+        javascript()->StoreScriptContext(0, feedback.slot_index()), value,
+        script_context, effect, control);
     ReplaceWithValue(node, value, effect, control);
     return Replace(value);
   } else if (feedback.IsPropertyCell()) {
@@ -1417,7 +1412,7 @@ Reduction JSNativeContextSpecialization::ReduceMegaDOMPropertyAccess(
       simplified()->LoadField(AccessBuilder::ForMapInstanceType()),
       receiver_map, effect, control);
 
-  if (v8_flags.embedder_instance_types && range_start != 0) {
+  if (v8_flags.experimental_embedder_instance_types && range_start != 0) {
     // Embedder instance ID is set, doing a simple range check.
     Node* diff_to_start =
         graph()->NewNode(simplified()->NumberSubtract(), receiver_instance_type,
@@ -1592,8 +1587,18 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
       // Super property access. lookup_start_object is a JSReceiver or
       // null. It can't be a number, a string etc. So trying to build the
       // checks in the "else if" branch doesn't make sense.
+
       access_builder.BuildCheckMaps(lookup_start_object, &effect, control,
                                     access_info.lookup_start_object_maps());
+
+      if (HasOnlyStringWrapperMaps(broker(),
+                                   access_info.lookup_start_object_maps())) {
+        // In order to be able to use StringWrapperLength, we need a TypeGuard
+        // when all input maps are StringWrapper maps.
+        lookup_start_object = effect =
+            graph()->NewNode(common()->TypeGuard(Type::StringWrapper()),
+                             lookup_start_object, effect, control);
+      }
 
     } else if (!access_builder.TryBuildStringCheck(
                    broker(), access_info.lookup_start_object_maps(), &receiver,
@@ -1628,6 +1633,19 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
       } else {
         access_builder.BuildCheckMaps(receiver, &effect, control,
                                       access_info.lookup_start_object_maps());
+      }
+
+      if (HasOnlyStringWrapperMaps(broker(),
+                                   access_info.lookup_start_object_maps())) {
+        // In order to be able to use StringWrapperLength, we need a TypeGuard
+        // when all input maps are StringWrapper maps. Note that, alternatively,
+        // we could have a CheckStringWrapper, but it makes things simpler to
+        // just rely on CheckMaps. This is slightly suboptimal in case the code
+        // contains multiple string wrappers with different properties, but this
+        // should be a rare case.
+        lookup_start_object = receiver = effect =
+            graph()->NewNode(common()->TypeGuard(Type::StringWrapper()),
+                             lookup_start_object, effect, control);
       }
     } else {
       // At least one of TryBuildStringCheck & TryBuildNumberCheck succeeded
@@ -1760,6 +1778,18 @@ Reduction JSNativeContextSpecialization::ReduceNamedAccess(
           this_lookup_start_object = this_receiver = this_effect =
               graph()->NewNode(common()->TypeGuard(Type::String()),
                                lookup_start_object, this_effect, this_control);
+        } else if (HasOnlyStringWrapperMaps(broker(),
+                                            lookup_start_object_maps)) {
+          bool receiver_is_lookup_start =
+              this_lookup_start_object == this_receiver;
+          DCHECK_IMPLIES(access_mode != AccessMode::kLoad,
+                         receiver_is_lookup_start);
+          this_lookup_start_object = this_effect =
+              graph()->NewNode(common()->TypeGuard(Type::StringWrapper()),
+                               lookup_start_object, this_effect, this_control);
+          if (receiver_is_lookup_start) {
+            this_receiver = this_lookup_start_object;
+          }
         }
       }
 
@@ -2522,26 +2552,39 @@ Reduction JSNativeContextSpecialization::ReducePropertyAccess(
          node->opcode() == IrOpcode::kJSDefineKeyedOwnProperty);
   DCHECK_GE(node->op()->ControlOutputCount(), 1);
 
-  ProcessedFeedback const& feedback =
-      broker()->GetFeedbackForPropertyAccess(source, access_mode, static_name);
-  switch (feedback.kind()) {
+  ProcessedFeedback const* feedback =
+      &broker()->GetFeedbackForPropertyAccess(source, access_mode, static_name);
+
+  if (feedback->kind() == ProcessedFeedback::kElementAccess &&
+      feedback->AsElementAccess().transition_groups().empty()) {
+    HeapObjectMatcher m_key(key);
+    if (m_key.HasResolvedValue() && m_key.Ref(broker()).IsName()) {
+      NameRef name_key = m_key.Ref(broker()).AsName();
+      if (name_key.IsUniqueName() && !name_key.object()->IsArrayIndex()) {
+        feedback = &feedback->AsElementAccess().Refine(
+            broker(), m_key.Ref(broker()).AsName());
+      }
+    }
+  }
+
+  switch (feedback->kind()) {
     case ProcessedFeedback::kInsufficient:
       return ReduceEagerDeoptimize(
           node,
           DeoptimizeReason::kInsufficientTypeFeedbackForGenericNamedAccess);
     case ProcessedFeedback::kNamedAccess:
-      return ReduceNamedAccess(node, value, feedback.AsNamedAccess(),
+      return ReduceNamedAccess(node, value, feedback->AsNamedAccess(),
                                access_mode, key);
     case ProcessedFeedback::kMegaDOMPropertyAccess:
       DCHECK_EQ(access_mode, AccessMode::kLoad);
       DCHECK_NULL(key);
       return ReduceMegaDOMPropertyAccess(
-          node, value, feedback.AsMegaDOMPropertyAccess(), source);
+          node, value, feedback->AsMegaDOMPropertyAccess(), source);
     case ProcessedFeedback::kElementAccess:
-      DCHECK_EQ(feedback.AsElementAccess().keyed_mode().access_mode(),
+      DCHECK_EQ(feedback->AsElementAccess().keyed_mode().access_mode(),
                 access_mode);
       DCHECK_NE(node->opcode(), IrOpcode::kJSLoadNamedFromSuper);
-      return ReduceElementAccess(node, key, value, feedback.AsElementAccess());
+      return ReduceElementAccess(node, key, value, feedback->AsElementAccess());
     default:
       UNREACHABLE();
   }
@@ -2943,6 +2986,9 @@ JSNativeContextSpecialization::BuildPropertyLoad(
   } else if (access_info.IsStringLength()) {
     DCHECK_EQ(receiver, lookup_start_object);
     value = graph()->NewNode(simplified()->StringLength(), receiver);
+  } else if (access_info.IsStringWrapperLength()) {
+    value = graph()->NewNode(simplified()->StringWrapperLength(),
+                             lookup_start_object);
   } else {
     DCHECK(access_info.IsDataField() || access_info.IsFastDataConstant() ||
            access_info.IsDictionaryProtoDataConstant());
@@ -3328,7 +3374,7 @@ JSNativeContextSpecialization::BuildElementAccess(
     element_type = Type::SignedSmall();
     element_machine_type = MachineType::TaggedSigned();
   }
-  ElementAccess element_access = {kTaggedBase, FixedArray::kHeaderSize,
+  ElementAccess element_access = {kTaggedBase, OFFSET_OF_DATA_START(FixedArray),
                                   element_type, element_machine_type,
                                   kFullWriteBarrier};
 

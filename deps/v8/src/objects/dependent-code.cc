@@ -21,8 +21,10 @@ Tagged<DependentCode> DependentCode::GetDependentCode(
     return Cast<PropertyCell>(object)->dependent_code();
   } else if (IsAllocationSite(object)) {
     return Cast<AllocationSite>(object)->dependent_code();
-  } else if (IsConstTrackingLetCell(object)) {
-    return Cast<ConstTrackingLetCell>(object)->dependent_code();
+  } else if (IsContextSidePropertyCell(object)) {
+    return Cast<ContextSidePropertyCell>(object)->dependent_code();
+  } else if (IsScopeInfo(object)) {
+    return Cast<ScopeInfo>(object)->dependent_code();
   }
   UNREACHABLE();
 }
@@ -35,8 +37,10 @@ void DependentCode::SetDependentCode(Handle<HeapObject> object,
     Cast<PropertyCell>(object)->set_dependent_code(*dep);
   } else if (IsAllocationSite(*object)) {
     Cast<AllocationSite>(object)->set_dependent_code(*dep);
-  } else if (IsConstTrackingLetCell(*object)) {
-    Cast<ConstTrackingLetCell>(object)->set_dependent_code(*dep);
+  } else if (IsContextSidePropertyCell(*object)) {
+    Cast<ContextSidePropertyCell>(object)->set_dependent_code(*dep);
+  } else if (IsScopeInfo(*object)) {
+    Cast<ScopeInfo>(object)->set_dependent_code(*dep);
   } else {
     UNREACHABLE();
   }
@@ -87,7 +91,7 @@ Handle<DependentCode> DependentCode::InsertWeakCode(
 
   // As the Code object lives outside of the sandbox in trusted space, we need
   // to use its in-sandbox wrapper object here.
-  MaybeObjectHandle code_slot(MakeWeak(code->wrapper()), isolate);
+  MaybeObjectDirectHandle code_slot(MakeWeak(code->wrapper()), isolate);
   entries = Cast<DependentCode>(WeakArrayList::AddToEnd(
       isolate, entries, code_slot, Smi::FromInt(groups)));
   return entries;
@@ -203,8 +207,10 @@ const char* DependentCode::DependencyGroupName(DependencyGroup group) {
       return "allocation-site-tenuring-changed";
     case kAllocationSiteTransitionChangedGroup:
       return "allocation-site-transition-changed";
-    case kConstTrackingLetChangedGroup:
-      return "const-tracking-let-changed";
+    case kScriptContextSlotPropertyChangedGroup:
+      return "script-context-slot-property-changed";
+    case kEmptyContextExtensionGroup:
+      return "empty-context-extension";
   }
   UNREACHABLE();
 }

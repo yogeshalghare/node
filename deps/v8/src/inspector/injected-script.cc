@@ -320,7 +320,7 @@ class InjectedScript::ProtocolPromiseHandler {
         session->inspector()->client()->dispatchError(scope.context(), message,
                                                       exception);
       }
-      protocol::PtrMaybe<protocol::Runtime::ExceptionDetails> exceptionDetails;
+      protocol::Maybe<protocol::Runtime::ExceptionDetails> exceptionDetails;
       response = scope.injectedScript()->createExceptionDetails(
           message, exception, m_objectGroup, &exceptionDetails);
       if (!response.IsSuccess()) {
@@ -639,9 +639,9 @@ Response InjectedScript::wrapObjectMirror(
   if (!response.IsSuccess()) return response;
   if (customPreviewEnabled && value->IsObject()) {
     std::unique_ptr<protocol::Runtime::CustomPreview> customPreview;
-    generateCustomPreview(sessionId, groupName, value.As<v8::Object>(),
-                          customPreviewConfig, maxCustomPreviewDepth,
-                          &customPreview);
+    generateCustomPreview(m_context->isolate(), sessionId, groupName,
+                          value.As<v8::Object>(), customPreviewConfig,
+                          maxCustomPreviewDepth, &customPreview);
     if (customPreview) (*result)->setCustomPreview(std::move(customPreview));
   }
   if (wrapOptions.mode == WrapMode::kDeep) {

@@ -17,6 +17,16 @@
 
 #define TSA_DCHECK(assembler, condition) \
   (assembler)->Asm().Dcheck(condition, #condition, __FILE__, __LINE__ )
+#ifdef ENABLE_SLOW_DCHECKS
+#define TSA_SLOW_DCHECK(assembler, ...)     \
+  do {                                      \
+    if (v8_flags.enable_slow_asserts) {     \
+        TSA_DCHECK(assembler, __VA_ARGS__); \
+    }                                       \
+  } while(false)
+#else
+#define TSA_SLOW_DCHECK(assembler, ...) ((void)0)
+#endif
 
 #define LIKELY(...) ConditionWithHint(__VA_ARGS__, BranchHint::kTrue)
 #define UNLIKELY(...) ConditionWithHint(__VA_ARGS__, BranchHint::kFalse)
@@ -78,16 +88,9 @@
 // warning with Pragmas. Clang and GCC helpfully disagree on where the warning
 // is (on the if or the else), so they need separate macros.
 #if defined(__clang__)
-#if defined(DEBUG) || defined(GOOGLE3)
-// TODO(dmercadier,leszeks): re-enable forced unrolling in DEBUG build. This
-// requires figuring out why Clang doesn't manage to unroll the loop in DEBUG
-// builds. In google3, forced unrolling also caused problems. Disable it there
-// for now as well.
-// TODO(349411321): re-enable forced unrolling in google3 again.
+// TODO(chromium:377144577): re-enable force-unrolling once this has been fixed
+// in LLVM.
 #define FORCE_UNROLL_LOOP
-#else
-#define FORCE_UNROLL_LOOP _Pragma("clang loop unroll(full)")
-#endif
 #define SUPPRESSED_DANGLING_ELSE_WARNING_IF(...) if (__VA_ARGS__)
 #define SUPPRESSED_DANGLING_ELSE_WARNING_ELSE                             \
   _Pragma("GCC diagnostic push")                                          \

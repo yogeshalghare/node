@@ -85,9 +85,15 @@ void LiftoffAssembler::CheckTierUp(int declared_func_index, int budget_used,
   Branch(ool_label, lt, budget, Operand{0});
 }
 
+Register LiftoffAssembler::LoadOldFramePointer() { return fp; }
+void LiftoffAssembler::CheckStackShrink() {
+  // TODO(irezvov): 42202153
+  UNIMPLEMENTED();
+}
+
 void LiftoffAssembler::PatchPrepareStackFrame(
     int offset, SafepointTableBuilder* safepoint_table_builder,
-    bool feedback_vector_slot) {
+    bool feedback_vector_slot, size_t stack_param_slots) {
   // The frame_size includes the frame marker and the instance slot. Both are
   // pushed as part of frame construction, so we don't need to allocate memory
   // for them anymore.
@@ -100,7 +106,7 @@ void LiftoffAssembler::PatchPrepareStackFrame(
   // assembler to try to grow the buffer.
   constexpr int kAvailableSpace = 256;
   MacroAssembler patching_assembler(
-      nullptr, AssemblerOptions{}, CodeObjectRequired::kNo,
+      zone(), AssemblerOptions{}, CodeObjectRequired::kNo,
       ExternalAssemblerBuffer(buffer_start_ + offset, kAvailableSpace));
 
   if (V8_LIKELY(frame_size < 4 * KB)) {
@@ -904,29 +910,47 @@ void LiftoffAssembler::emit_i32x4_relaxed_trunc_f32x4_s(LiftoffRegister dst,
                                                         LiftoffRegister src) {
   VU.set(FPURoundingMode::RTZ);
   VU.set(kScratchReg, E32, m1);
-  vfcvt_x_f_v(dst.fp().toV(), src.fp().toV());
+  vmfeq_vv(v0, src.fp().toV(), src.fp().toV());
+  vmv_vv(kSimd128ScratchReg, src.fp().toV());
+  vmv_vx(dst.fp().toV(), zero_reg);
+  vfcvt_x_f_v(dst.fp().toV(), kSimd128ScratchReg, MaskType::Mask);
 }
 void LiftoffAssembler::emit_i32x4_relaxed_trunc_f32x4_u(LiftoffRegister dst,
                                                         LiftoffRegister src) {
   VU.set(FPURoundingMode::RTZ);
   VU.set(kScratchReg, E32, m1);
-  vfcvt_xu_f_v(dst.fp().toV(), src.fp().toV());
+  vmfeq_vv(v0, src.fp().toV(), src.fp().toV());
+  li(kScratchReg, Operand(-1));
+  vmv_vv(kSimd128ScratchReg, src.fp().toV());
+  vmv_vx(dst.fp().toV(), kScratchReg);
+  vfcvt_xu_f_v(dst.fp().toV(), kSimd128ScratchReg, MaskType::Mask);
 }
+
 void LiftoffAssembler::emit_i32x4_relaxed_trunc_f64x2_s_zero(
     LiftoffRegister dst, LiftoffRegister src) {
+  VU.set(kScratchReg, E64, m1);
+  vmfeq_vv(v0, src.fp().toV(), src.fp().toV());
+
   VU.set(kScratchReg, E32, m1);
   VU.set(FPURoundingMode::RTZ);
   vmv_vv(kSimd128ScratchReg, src.fp().toV());
-  vfncvt_x_f_w(kSimd128ScratchReg, kSimd128ScratchReg);
-  vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
+  vmv_vx(dst.fp().toV(), zero_reg);
+  vfncvt_x_f_w(dst.fp().toV(), kSimd128ScratchReg, MaskType::Mask);
 }
+
 void LiftoffAssembler::emit_i32x4_relaxed_trunc_f64x2_u_zero(
     LiftoffRegister dst, LiftoffRegister src) {
+  VU.set(kScratchReg, E64, m1);
+  vmv_vv(kSimd128ScratchReg, v0);
+  vmv_vv(kSimd128ScratchReg, src.fp().toV());
+  vmfeq_vv(v0, src.fp().toV(), src.fp().toV());
   VU.set(kScratchReg, E32, m1);
   VU.set(FPURoundingMode::RTZ);
+  li(kScratchReg, Operand(-1));
   vmv_vv(kSimd128ScratchReg, src.fp().toV());
-  vfncvt_xu_f_w(kSimd128ScratchReg, kSimd128ScratchReg);
-  vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
+  vmv_vx(dst.fp().toV(), zero_reg);
+  vmerge_vx(dst.fp().toV(), kScratchReg, dst.fp().toV());
+  vfncvt_xu_f_w(dst.fp().toV(), kSimd128ScratchReg, MaskType::Mask);
 }
 
 void LiftoffAssembler::emit_f64x2_eq(LiftoffRegister dst, LiftoffRegister lhs,
@@ -2169,8 +2193,9 @@ void LiftoffAssembler::emit_f32x4_qfma(LiftoffRegister dst,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
   VU.set(kScratchReg, E32, m1);
-  vfmadd_vv(src1.fp().toV(), src2.fp().toV(), src3.fp().toV());
-  vmv_vv(dst.fp().toV(), src1.fp().toV());
+  vmv_vv(kSimd128ScratchReg, src1.fp().toV());
+  vfmadd_vv(kSimd128ScratchReg, src2.fp().toV(), src3.fp().toV());
+  vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
 }
 
 void LiftoffAssembler::emit_f32x4_qfms(LiftoffRegister dst,
@@ -2178,8 +2203,9 @@ void LiftoffAssembler::emit_f32x4_qfms(LiftoffRegister dst,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
   VU.set(kScratchReg, E32, m1);
-  vfnmsub_vv(src1.fp().toV(), src2.fp().toV(), src3.fp().toV());
-  vmv_vv(dst.fp().toV(), src1.fp().toV());
+  vmv_vv(kSimd128ScratchReg, src1.fp().toV());
+  vfnmsub_vv(kSimd128ScratchReg, src2.fp().toV(), src3.fp().toV());
+  vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
 }
 
 void LiftoffAssembler::emit_f64x2_qfma(LiftoffRegister dst,
@@ -2187,8 +2213,9 @@ void LiftoffAssembler::emit_f64x2_qfma(LiftoffRegister dst,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
   VU.set(kScratchReg, E64, m1);
-  vfmadd_vv(src1.fp().toV(), src2.fp().toV(), src3.fp().toV());
-  vmv_vv(dst.fp().toV(), src1.fp().toV());
+  vmv_vv(kSimd128ScratchReg, src1.fp().toV());
+  vfmadd_vv(kSimd128ScratchReg, src2.fp().toV(), src3.fp().toV());
+  vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
 }
 
 void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
@@ -2196,13 +2223,9 @@ void LiftoffAssembler::emit_f64x2_qfms(LiftoffRegister dst,
                                        LiftoffRegister src2,
                                        LiftoffRegister src3) {
   VU.set(kScratchReg, E64, m1);
-  vfnmsub_vv(src1.fp().toV(), src2.fp().toV(), src3.fp().toV());
-  vmv_vv(dst.fp().toV(), src1.fp().toV());
-}
-
-void LiftoffAssembler::set_trap_on_oob_mem64(Register index, uint64_t oob_size,
-                                             uint64_t oob_index) {
-  UNREACHABLE();
+  vmv_vv(kSimd128ScratchReg, src1.fp().toV());
+  vfnmsub_vv(kSimd128ScratchReg, src2.fp().toV(), src3.fp().toV());
+  vmv_vv(dst.fp().toV(), kSimd128ScratchReg);
 }
 
 void LiftoffAssembler::StackCheck(Label* ool_code) {

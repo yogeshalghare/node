@@ -7,6 +7,7 @@
 
 #include "src/baseline/bytecode-offset-iterator.h"
 #include "src/codegen/code-desc.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/heap-write-barrier-inl.h"
 #include "src/objects/code.h"
 #include "src/objects/deoptimization-data-inl.h"
@@ -44,7 +45,7 @@ GCSAFE_CODE_FWD_ACCESSOR(bool, is_turbofanned)
 GCSAFE_CODE_FWD_ACCESSOR(bool, has_tagged_outgoing_params)
 GCSAFE_CODE_FWD_ACCESSOR(bool, marked_for_deoptimization)
 GCSAFE_CODE_FWD_ACCESSOR(Tagged<Object>, raw_instruction_stream)
-GCSAFE_CODE_FWD_ACCESSOR(int, stack_slots)
+GCSAFE_CODE_FWD_ACCESSOR(uint32_t, stack_slots)
 GCSAFE_CODE_FWD_ACCESSOR(uint16_t, wasm_js_tagged_parameter_count)
 GCSAFE_CODE_FWD_ACCESSOR(uint16_t, wasm_js_first_tagged_parameter)
 GCSAFE_CODE_FWD_ACCESSOR(Address, constant_pool)
@@ -104,7 +105,7 @@ inline Tagged<ProtectedFixedArray> Code::deoptimization_data() const {
 inline void Code::set_deoptimization_data(Tagged<ProtectedFixedArray> value,
                                           WriteBarrierMode mode) {
   DCHECK(uses_deoptimization_data());
-  DCHECK(!ObjectInYoungGeneration(value));
+  DCHECK(!HeapLayout::InYoungGeneration(value));
 
   WriteProtectedPointerField(kDeoptimizationDataOrInterpreterDataOffset, value);
   CONDITIONAL_PROTECTED_POINTER_WRITE_BARRIER(
@@ -414,6 +415,10 @@ inline bool Code::has_tagged_outgoing_params() const {
 #endif
 }
 
+inline bool Code::is_context_specialized() const {
+  return IsContextSpecializedField::decode(flags(kRelaxedLoad));
+}
+
 inline bool Code::is_turbofanned() const {
   return IsTurbofannedField::decode(flags(kRelaxedLoad));
 }
@@ -468,10 +473,14 @@ bool Code::uses_safepoint_table() const {
   return is_turbofanned() || is_maglevved() || is_wasm_code();
 }
 
-int Code::stack_slots() const {
-  const int slots = StackSlotsField::decode(flags(kRelaxedLoad));
-  DCHECK_IMPLIES(!uses_safepoint_table(), slots == 0);
-  return slots;
+uint32_t Code::stack_slots() const {
+  DCHECK_IMPLIES(safepoint_table_size() > 0, uses_safepoint_table());
+  if (safepoint_table_size() == 0) return 0;
+  DCHECK(safepoint_table_size() >=
+         static_cast<int>(sizeof(SafepointTableStackSlotsField_t)));
+  static_assert(kSafepointTableStackSlotsOffset == 0);
+  return base::Memory<SafepointTableStackSlotsField_t>(
+      safepoint_table_address() + kSafepointTableStackSlotsOffset);
 }
 
 bool Code::marked_for_deoptimization() const {
@@ -536,10 +545,39 @@ Address Code::code_comments() const {
 }
 
 int Code::code_comments_size() const {
-  return unwinding_info_offset() - code_comments_offset();
+  return builtin_jump_table_info_offset() - code_comments_offset();
 }
 
 bool Code::has_code_comments() const { return code_comments_size() > 0; }
+
+int32_t Code::builtin_jump_table_info_offset() const {
+  if (!V8_BUILTIN_JUMP_TABLE_INFO_BOOL) {
+    // Redirection needed since the field doesn't exist in this case.
+    return unwinding_info_offset();
+  }
+  return ReadField<int32_t>(kBuiltinJumpTableInfoOffsetOffset);
+}
+
+void Code::set_builtin_jump_table_info_offset(int32_t value) {
+  if (!V8_BUILTIN_JUMP_TABLE_INFO_BOOL) {
+    // Redirection needed since the field doesn't exist in this case.
+    return;
+  }
+  DCHECK_LE(value, metadata_size());
+  WriteField<int32_t>(kBuiltinJumpTableInfoOffsetOffset, value);
+}
+
+Address Code::builtin_jump_table_info() const {
+  return metadata_start() + builtin_jump_table_info_offset();
+}
+
+int Code::builtin_jump_table_info_size() const {
+  return unwinding_info_offset() - builtin_jump_table_info_offset();
+}
+
+bool Code::has_builtin_jump_table_info() const {
+  return builtin_jump_table_info_size() > 0;
+}
 
 Address Code::unwinding_info_start() const {
   return metadata_start() + unwinding_info_offset();
@@ -628,7 +666,7 @@ bool Code::has_instruction_stream() const {
 #else
   const uint64_t value = ReadField<uint64_t>(kInstructionStreamOffset);
 #endif
-  SLOW_DCHECK(value == 0 || !InReadOnlySpace(*this));
+  SLOW_DCHECK(value == 0 || !HeapLayout::InReadOnlySpace(*this));
   return value != 0;
 }
 
@@ -640,7 +678,7 @@ bool Code::has_instruction_stream(RelaxedLoadTag tag) const {
   const uint64_t value =
       RELAXED_READ_INT64_FIELD(*this, kInstructionStreamOffset);
 #endif
-  SLOW_DCHECK(value == 0 || !InReadOnlySpace(*this));
+  SLOW_DCHECK(value == 0 || !HeapLayout::InReadOnlySpace(*this));
   return value != 0;
 }
 
@@ -765,17 +803,14 @@ void Code::clear_padding() {
 
 RELAXED_UINT32_ACCESSORS(Code, flags, kFlagsOffset)
 
-void Code::initialize_flags(CodeKind kind, bool is_turbofanned,
-                            int stack_slots) {
-  CHECK(0 <= stack_slots && stack_slots < StackSlotsField::kMax);
+void Code::initialize_flags(CodeKind kind, bool is_context_specialized,
+                            bool is_turbofanned) {
   DCHECK(!CodeKindIsInterpretedJSFunction(kind));
   uint32_t value = KindField::encode(kind) |
-                   IsTurbofannedField::encode(is_turbofanned) |
-                   StackSlotsField::encode(stack_slots);
+                   IsContextSpecializedField::encode(is_context_specialized) |
+                   IsTurbofannedField::encode(is_turbofanned);
   static_assert(FIELD_SIZE(kFlagsOffset) == kInt32Size);
   set_flags(value, kRelaxedStore);
-  DCHECK_IMPLIES(stack_slots != 0, uses_safepoint_table());
-  DCHECK_IMPLIES(!uses_safepoint_table(), stack_slots == 0);
 }
 
 // Ensure builtin_id field fits into int16_t, so that we can rely on sign

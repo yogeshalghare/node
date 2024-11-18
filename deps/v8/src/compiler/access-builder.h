@@ -95,9 +95,6 @@ class V8_EXPORT_PRIVATE AccessBuilder final
   // Provides access to JSFunction::context() field.
   static FieldAccess ForJSFunctionContext();
 
-  // Provides access to JSFunction::code() field.
-  static FieldAccess ForJSFunctionCode();
-
   // Provides access to JSFunction::shared() field.
   static FieldAccess ForJSFunctionSharedFunctionInfo();
 
@@ -107,6 +104,9 @@ class V8_EXPORT_PRIVATE AccessBuilder final
 #ifdef V8_ENABLE_LEAPTIERING
   // Provides access to JSFunction::dispatch_handle() field.
   static FieldAccess ForJSFunctionDispatchHandleNoWriteBarrier();
+#else
+  // Provides access to JSFunction::code() field.
+  static FieldAccess ForJSFunctionCode();
 #endif  // V8_ENABLE_LEAPTIERING
 
   // Provides access to JSBoundFunction::bound_target_function() field.
@@ -334,6 +334,9 @@ class V8_EXPORT_PRIVATE AccessBuilder final
   // Provides access to Context slots that are known to be pointers.
   static FieldAccess ForContextSlotKnownPointer(size_t index);
 
+  // Provides access to Context slots that are known to be Smis.
+  static FieldAccess ForContextSlotSmi(size_t index);
+
   // Provides access to WeakFixedArray elements.
   static ElementAccess ForWeakFixedArrayElement();
   static FieldAccess ForWeakFixedArraySlot(int index);
@@ -397,6 +400,8 @@ class V8_EXPORT_PRIVATE AccessBuilder final
   static FieldAccess ForWasmArrayLength();
   static FieldAccess ForWasmDispatchTableLength();
 #endif
+
+  static FieldAccess ForContextSideProperty();
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(AccessBuilder);

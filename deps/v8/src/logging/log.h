@@ -16,6 +16,7 @@
 #include "src/execution/isolate.h"
 #include "src/logging/code-events.h"
 #include "src/objects/objects.h"
+#include "src/regexp/regexp-flags.h"
 
 namespace v8 {
 
@@ -188,8 +189,8 @@ class V8FileLogger : public LogEventListener {
   void CallbackEvent(Handle<Name> name, Address entry_point) override;
   void GetterCallbackEvent(Handle<Name> name, Address entry_point) override;
   void SetterCallbackEvent(Handle<Name> name, Address entry_point) override;
-  void RegExpCodeCreateEvent(Handle<AbstractCode> code,
-                             Handle<String> source) override;
+  void RegExpCodeCreateEvent(Handle<AbstractCode> code, Handle<String> source,
+                             RegExpFlags flags) override;
   void CodeMoveEvent(Tagged<InstructionStream> from,
                      Tagged<InstructionStream> to) override;
   void BytecodeMoveEvent(Tagged<BytecodeArray> from,
@@ -439,8 +440,8 @@ class V8_EXPORT_PRIVATE CodeEventLogger : public LogEventListener {
                        int code_offset, int script_id) override;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-  void RegExpCodeCreateEvent(Handle<AbstractCode> code,
-                             Handle<String> source) override;
+  void RegExpCodeCreateEvent(Handle<AbstractCode> code, Handle<String> source,
+                             RegExpFlags flags) override;
   void CallbackEvent(Handle<Name> name, Address entry_point) override {}
   void GetterCallbackEvent(Handle<Name> name, Address entry_point) override {}
   void SetterCallbackEvent(Handle<Name> name, Address entry_point) override {}
@@ -464,10 +465,10 @@ class V8_EXPORT_PRIVATE CodeEventLogger : public LogEventListener {
 
   virtual void LogRecordedBuffer(Tagged<AbstractCode> code,
                                  MaybeHandle<SharedFunctionInfo> maybe_shared,
-                                 const char* name, int length) = 0;
+                                 const char* name, size_t length) = 0;
 #if V8_ENABLE_WEBASSEMBLY
   virtual void LogRecordedBuffer(const wasm::WasmCode* code, const char* name,
-                                 int length) = 0;
+                                 size_t length) = 0;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   std::unique_ptr<NameBuffer> name_buffer_;
@@ -507,8 +508,8 @@ class ExternalLogEventListener : public LogEventListener {
                        int code_offset, int script_id) override;
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-  void RegExpCodeCreateEvent(Handle<AbstractCode> code,
-                             Handle<String> source) override;
+  void RegExpCodeCreateEvent(Handle<AbstractCode> code, Handle<String> source,
+                             RegExpFlags flags) override;
   void CallbackEvent(Handle<Name> name, Address entry_point) override {}
   void GetterCallbackEvent(Handle<Name> name, Address entry_point) override {}
   void SetterCallbackEvent(Handle<Name> name, Address entry_point) override {}

@@ -31,7 +31,8 @@ TEST_F(RuntimeTest, ReturnsPrototype) {
   result->Get(context(), 0)
       .ToLocalChecked()
       .As<v8::String>()
-      ->WriteUtf8(isolate(), name_buffer);
+      ->WriteUtf8V2(isolate(), name_buffer, sizeof(name_buffer),
+                    v8::String::WriteFlags::kNullTerminate);
   EXPECT_EQ("[[Prototype]]", std::string(name_buffer));
 }
 
@@ -62,7 +63,8 @@ TEST_F(RuntimeTest, WasmTableWithoutInstance) {
   uint32_t maximum = std::numeric_limits<uint32_t>::max();
   Handle<WasmTableObject> table = WasmTableObject::New(
       i_isolate(), Handle<WasmTrustedInstanceData>(), wasm::kWasmAnyRef,
-      initial, has_maximum, maximum, i_isolate()->factory()->null_value());
+      initial, has_maximum, maximum, i_isolate()->factory()->null_value(),
+      wasm::AddressType::kI32);
   MaybeHandle<JSArray> result =
       Runtime::GetInternalProperties(i_isolate(), table);
   ASSERT_FALSE(result.is_null());

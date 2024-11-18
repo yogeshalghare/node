@@ -9,6 +9,7 @@ transitioning javascript builtin SetPrototypeIsSubsetOf(
     js-implicit context: NativeContext, receiver: JSAny)(
     other: JSAny): Boolean {
   const methodName: constexpr string = 'Set.prototype.isSubsetOf';
+  IncrementUseCounter(context, SmiConstant(kSetMethods));
 
   // 1. Let O be the this value.
   // 2. Perform ? RequireInternalSlot(O, [[SetData]]).
@@ -25,8 +26,7 @@ transitioning javascript builtin SetPrototypeIsSubsetOf(
   const thisSize = table.LoadSize();
 
   // 5. If thisSize > otherRec.[[Size]], return false.
-  if (!(otherRec.size == V8_INFINITY) &&
-      thisSize > Convert<int32>(otherRec.size)) {
+  if (Convert<Number>(thisSize) > otherRec.size) {
     return False;
   }
 

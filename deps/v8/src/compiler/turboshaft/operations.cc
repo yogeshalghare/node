@@ -16,9 +16,9 @@
 #include "src/common/globals.h"
 #include "src/compiler/backend/instruction-selector.h"
 #include "src/compiler/frame-states.h"
-#include "src/compiler/graph-visualizer.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/machine-operator.h"
+#include "src/compiler/turbofan-graph-visualizer.h"
 #include "src/compiler/turboshaft/deopt-data.h"
 #include "src/compiler/turboshaft/graph.h"
 #include "src/handles/handles-inl.h"
@@ -135,6 +135,7 @@ bool ValidOpInputRep(
   std::cerr << "Expected " << (expected_reps.size() > 1 ? "one of " : "")
             << PrintCollection(expected_reps).WithoutBrackets() << " but found "
             << input_rep << ".\n";
+  std::cout << "Input: " << graph.Get(input) << "\n";
   return false;
 }
 
@@ -178,6 +179,15 @@ std::ostream& operator<<(std::ostream& os, GenericUnopOp::Kind kind) {
     return os << #Name;
     GENERIC_UNOP_LIST(PRINT_KIND)
 #undef PRINT_KIND
+  }
+}
+
+std::ostream& operator<<(std::ostream& os, Word32SignHintOp::Sign sign) {
+  switch (sign) {
+    case Word32SignHintOp::Sign::kSigned:
+      return os << "Signed";
+    case Word32SignHintOp::Sign::kUnsigned:
+      return os << "Unsigned";
   }
 }
 
@@ -353,6 +363,8 @@ std::ostream& operator<<(std::ostream& os, ChangeOp::Kind kind) {
       return os << "FloatConversion";
     case ChangeOp::Kind::kJSFloatTruncate:
       return os << "JSFloatTruncate";
+    case ChangeOp::Kind::kJSFloat16TruncateWithBitcast:
+      return os << "JSFloat16TruncateWithBitcast";
     case ChangeOp::Kind::kSignedFloatTruncateOverflowToMin:
       return os << "SignedFloatTruncateOverflowToMin";
     case ChangeOp::Kind::kUnsignedFloatTruncateOverflowToMin:
@@ -573,6 +585,10 @@ void ConstantOp::PrintOptions(std::ostream& os) const {
       os << "relocatable wasm canonical signature ID: "
          << static_cast<int32_t>(storage.integral);
       break;
+    case Kind::kRelocatableWasmIndirectCallTarget:
+      os << "relocatable wasm indirect call target: "
+         << static_cast<uint32_t>(storage.integral);
+      break;
   }
   os << ']';
 }
@@ -743,6 +759,11 @@ void FrameStateOp::PrintOptions(std::ostream& os) const {
         os << '$' << id;
         break;
       }
+      case FrameStateData::Instr::kDematerializedStringConcat: {
+        it.ConsumeDematerializedStringConcat();
+        os << "DematerializedStringConcat";
+        break;
+      }
       case FrameStateData::Instr::kArgumentsElements: {
         CreateArgumentsType type;
         it.ConsumeArgumentsElements(&type);
@@ -799,6 +820,10 @@ void FrameStateOp::Validate(const Graph& graph) const {
         it.ConsumeDematerializedObjectReference(&id);
         break;
       }
+      case FrameStateData::Instr::kDematerializedStringConcat: {
+        it.ConsumeDematerializedStringConcat();
+        break;
+      }
       case FrameStateData::Instr::kArgumentsElements: {
         CreateArgumentsType type;
         it.ConsumeArgumentsElements(&type);
@@ -828,6 +853,11 @@ void DidntThrowOp::Validate(const Graph& graph) const {
     case Opcode::kCall: {
       auto& call_op = graph.Get(throwing_operation()).Cast<CallOp>();
       DCHECK_EQ(call_op.descriptor->out_reps, outputs_rep());
+      break;
+    }
+    case Opcode::kFastApiCall: {
+      auto& call_op = graph.Get(throwing_operation()).Cast<FastApiCallOp>();
+      DCHECK_EQ(call_op.out_reps, outputs_rep());
       break;
     }
 #define STATIC_OUTPUT_CASE(Name)                                           \
@@ -1431,6 +1461,33 @@ std::ostream& operator<<(std::ostream& os,
   }
 }
 
+void PrintMapSet(std::ostream& os, const ZoneRefSet<Map>& maps) {
+  os << "{";
+  for (size_t i = 0; i < maps.size(); ++i) {
+    if (i != 0) os << ",";
+    os << JSONEscaped(maps[i].object());
+  }
+  os << "}";
+}
+
+void CompareMapsOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  PrintMapSet(os, maps);
+  os << "]";
+}
+
+void CheckMapsOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  PrintMapSet(os, maps);
+  os << ", " << flags << ", " << feedback << "]";
+}
+
+void AssumeMapOp::PrintOptions(std::ostream& os) const {
+  os << "[";
+  PrintMapSet(os, maps);
+  os << "]";
+}
+
 std::ostream& operator<<(std::ostream& os, SameValueOp::Mode mode) {
   switch (mode) {
     case SameValueOp::Mode::kSameValue:
@@ -1505,6 +1562,7 @@ const RegisterRepresentation& RepresentationFor(wasm::ValueType type) {
       return kSimd128;
     case wasm::kVoid:
     case wasm::kRtt:
+    case wasm::kTop:
     case wasm::kBottom:
       UNREACHABLE();
   }

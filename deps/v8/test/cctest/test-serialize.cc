@@ -44,7 +44,9 @@
 #include "src/codegen/script-details.h"
 #include "src/common/assert-scope.h"
 #include "src/debug/debug-coverage.h"
+#include "src/flags/flags.h"
 #include "src/heap/heap-inl.h"
+#include "src/heap/heap-layout-inl.h"
 #include "src/heap/parked-scope-inl.h"
 #include "src/heap/read-only-heap.h"
 #include "src/heap/read-only-promotion.h"
@@ -155,7 +157,7 @@ base::Vector<const uint8_t> WritePayload(
   int length = payload.length();
   uint8_t* blob = NewArray<uint8_t>(length);
   memcpy(blob, payload.begin(), length);
-  return base::Vector<const uint8_t>(const_cast<const uint8_t*>(blob), length);
+  return base::VectorOf(blob, length);
 }
 
 // Convenience wrapper around the convenience wrapper.
@@ -501,7 +503,7 @@ UNINITIALIZED_TEST(ContextSerializerContext) {
 
     Isolate* isolate = reinterpret_cast<Isolate*>(v8_isolate);
     HandleScope handle_scope(isolate);
-    Handle<Object> root;
+    DirectHandle<Object> root;
     Handle<JSGlobalProxy> global_proxy =
         isolate->factory()->NewUninitializedJSGlobalProxy(
             JSGlobalProxy::SizeWithEmbedderFields(0));
@@ -516,7 +518,7 @@ UNINITIALIZED_TEST(ContextSerializerContext) {
       CHECK(Cast<Context>(root)->global_proxy() == *global_proxy);
     }
 
-    Handle<Object> root2;
+    DirectHandle<Object> root2;
     {
       SnapshotData snapshot_data(context_blob);
       root2 = ContextDeserializer::DeserializeContext(
@@ -682,7 +684,7 @@ UNINITIALIZED_TEST(ContextSerializerCustomContext) {
 
     Isolate* isolate = reinterpret_cast<Isolate*>(v8_isolate);
     HandleScope handle_scope(isolate);
-    Handle<Object> root;
+    DirectHandle<Object> root;
     Handle<JSGlobalProxy> global_proxy =
         isolate->factory()->NewUninitializedJSGlobalProxy(
             JSGlobalProxy::SizeWithEmbedderFields(0));
@@ -694,7 +696,7 @@ UNINITIALIZED_TEST(ContextSerializerCustomContext) {
                      v8::DeserializeInternalFieldsCallback()))
                  .ToHandleChecked();
       CHECK(IsContext(*root));
-      Handle<NativeContext> context = Cast<NativeContext>(root);
+      DirectHandle<NativeContext> context = Cast<NativeContext>(root);
 
       // Add context to the weak native context list
       Cast<Context>(context)->set(Context::NEXT_CONTEXT_LINK,
@@ -1719,7 +1721,7 @@ int CountBuiltins() {
   return counter;
 }
 
-static Handle<SharedFunctionInfo> CompileScript(
+static DirectHandle<SharedFunctionInfo> CompileScript(
     Isolate* isolate, Handle<String> source,
     const ScriptDetails& script_details, AlignedCachedData* cached_data,
     v8::ScriptCompiler::CompileOptions options,
@@ -1735,18 +1737,19 @@ static Handle<SharedFunctionInfo> CompileScript(
   return result;
 }
 
-static Handle<SharedFunctionInfo> CompileScriptAndProduceCache(
+static DirectHandle<SharedFunctionInfo> CompileScriptAndProduceCache(
     Isolate* isolate, Handle<String> source,
     const ScriptDetails& script_details, AlignedCachedData** out_cached_data,
     v8::ScriptCompiler::CompileOptions options,
     ScriptCompiler::InMemoryCacheResult expected_lookup_result =
         ScriptCompiler::InMemoryCacheResult::kMiss) {
   ScriptCompiler::CompilationDetails compilation_details;
-  Handle<SharedFunctionInfo> sfi = Compiler::GetSharedFunctionInfoForScript(
-                                       isolate, source, script_details, options,
-                                       ScriptCompiler::kNoCacheNoReason,
-                                       NOT_NATIVES_CODE, &compilation_details)
-                                       .ToHandleChecked();
+  DirectHandle<SharedFunctionInfo> sfi =
+      Compiler::GetSharedFunctionInfoForScript(
+          isolate, source, script_details, options,
+          ScriptCompiler::kNoCacheNoReason, NOT_NATIVES_CODE,
+          &compilation_details)
+          .ToHandleChecked();
   CHECK_EQ(compilation_details.in_memory_cache_result, expected_lookup_result);
   std::unique_ptr<ScriptCompiler::CachedData> cached_data(
       ScriptCompiler::CreateCodeCache(ToApiHandle<UnboundScript>(sfi)));
@@ -1831,7 +1834,7 @@ void TestCodeSerializerOnePlusOneImpl(bool verify_builtins_count = true) {
 
   int builtins_count = CountBuiltins();
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, copy_source, default_script_details, cache,
@@ -1839,7 +1842,8 @@ void TestCodeSerializerOnePlusOneImpl(bool verify_builtins_count = true) {
   }
 
   CHECK_NE(*orig, *copy);
-  CHECK(Cast<Script>(copy->script())->source() == *copy_source);
+  CHECK(Cast<String>(Cast<Script>(copy->script())->source())
+            ->Equals(*copy_source));
 
   Handle<JSFunction> copy_fun =
       Factory::JSFunctionBuilder{isolate, copy, isolate->native_context()}
@@ -2321,7 +2325,7 @@ TEST(CodeSerializerInternalizedString) {
   Handle<JSObject> global(isolate->context()->global_object(), isolate);
 
   i::AlignedCachedData* cached_data = nullptr;
-  Handle<SharedFunctionInfo> orig = CompileScriptAndProduceCache(
+  DirectHandle<SharedFunctionInfo> orig = CompileScriptAndProduceCache(
       isolate, orig_source, ScriptDetails(), &cached_data,
       v8::ScriptCompiler::kNoCompileOptions);
   Handle<JSFunction> orig_fun =
@@ -2335,14 +2339,15 @@ TEST(CodeSerializerInternalizedString) {
 
   int builtins_count = CountBuiltins();
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, copy_source, ScriptDetails(), cached_data,
                          v8::ScriptCompiler::kConsumeCodeCache);
   }
   CHECK_NE(*orig, *copy);
-  CHECK(Cast<Script>(copy->script())->source() == *copy_source);
+  CHECK(Cast<String>(Cast<Script>(copy->script())->source())
+            ->Equals(*copy_source));
 
   Handle<JSFunction> copy_fun =
       Factory::JSFunctionBuilder{isolate, copy, isolate->native_context()}
@@ -2395,7 +2400,7 @@ TEST(CodeSerializerLargeCodeObject) {
       isolate->heap()->InSpace(orig->abstract_code(isolate), LO_SPACE) ||
       isolate->heap()->InSpace(orig->abstract_code(isolate), TRUSTED_LO_SPACE));
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, source_str, ScriptDetails(), cache,
@@ -2476,7 +2481,7 @@ TEST(CodeSerializerLargeCodeObjectWithIncrementalMarking) {
   CHECK(marking->IsCompacting());
   CHECK(MarkCompactCollector::IsOnEvacuationCandidate(*moving_object));
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, source_str, ScriptDetails(), cache,
@@ -2533,7 +2538,7 @@ TEST(CodeSerializerLargeStrings) {
       CompileScriptAndProduceCache(isolate, source_str, ScriptDetails(), &cache,
                                    v8::ScriptCompiler::kNoCompileOptions);
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, source_str, ScriptDetails(), cache,
@@ -2557,8 +2562,13 @@ TEST(CodeSerializerLargeStrings) {
   property = JSReceiver::GetDataProperty(isolate, isolate->global_object(),
                                          f->NewStringFromAsciiChecked("t"));
   CHECK(isolate->heap()->InSpace(Cast<HeapObject>(*property), LO_SPACE));
-  // Make sure we do not serialize too much, e.g. include the source string.
+// Make sure we do not serialize too much.
+#ifdef DEBUG
+  CHECK_LT(cache->length(), 24100000);
+#else
+  // Make sure we don't include the source string.
   CHECK_LT(cache->length(), 13000000);
+#endif
 
   delete cache;
   source_s.Dispose();
@@ -2609,7 +2619,7 @@ TEST(CodeSerializerThreeBigStrings) {
       CompileScriptAndProduceCache(isolate, source_str, ScriptDetails(), &cache,
                                    v8::ScriptCompiler::kNoCompileOptions);
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, source_str, ScriptDetails(), cache,
@@ -2699,7 +2709,7 @@ TEST(CodeSerializerExternalString) {
   Handle<String> one_byte_string =
       isolate->factory()->NewStringFromAsciiChecked("one_byte");
   one_byte_string = isolate->factory()->InternalizeString(one_byte_string);
-  one_byte_string->MakeExternal(&one_byte_resource);
+  one_byte_string->MakeExternal(isolate, &one_byte_resource);
   CHECK(IsExternalOneByteString(*one_byte_string));
   CHECK(IsInternalizedString(*one_byte_string));
 
@@ -2712,7 +2722,7 @@ TEST(CodeSerializerExternalString) {
           ->NewStringFromTwoByte(base::VectorOf(two_byte, two_byte_length))
           .ToHandleChecked();
   two_byte_string = isolate->factory()->InternalizeString(two_byte_string);
-  two_byte_string->MakeExternal(&two_byte_resource);
+  two_byte_string->MakeExternal(isolate, &two_byte_resource);
   CHECK(IsExternalTwoByteString(*two_byte_string));
   CHECK(IsInternalizedString(*two_byte_string));
 
@@ -2733,7 +2743,7 @@ TEST(CodeSerializerExternalString) {
       isolate, source_string, ScriptDetails(), &cache,
       v8::ScriptCompiler::kNoCompileOptions);
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, source_string, ScriptDetails(), cache,
@@ -2778,7 +2788,7 @@ TEST(CodeSerializerLargeExternalString) {
   SerializerOneByteResource one_byte_resource(
       reinterpret_cast<const char*>(string.begin()), string.length());
   name = f->InternalizeString(name);
-  name->MakeExternal(&one_byte_resource);
+  name->MakeExternal(isolate, &one_byte_resource);
   CHECK(IsExternalOneByteString(*name));
   CHECK(IsInternalizedString(*name));
   CHECK(isolate->heap()->InSpace(*name, LO_SPACE));
@@ -2799,7 +2809,7 @@ TEST(CodeSerializerLargeExternalString) {
       CompileScriptAndProduceCache(isolate, source_str, ScriptDetails(), &cache,
                                    v8::ScriptCompiler::kNoCompileOptions);
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, source_str, ScriptDetails(), cache,
@@ -2854,7 +2864,7 @@ TEST(CodeSerializerExternalScriptName) {
       isolate, source_string, ScriptDetails(name), &cache,
       v8::ScriptCompiler::kNoCompileOptions);
 
-  Handle<SharedFunctionInfo> copy;
+  DirectHandle<SharedFunctionInfo> copy;
   {
     DisallowCompilation no_compile_expected(isolate);
     copy = CompileScript(isolate, source_string, ScriptDetails(name), cache,
@@ -3078,6 +3088,72 @@ TEST(CodeSerializerAfterExecute) {
   v8_flags.always_turbofan = prev_always_turbofan_value;
 }
 
+TEST(CodeSerializerEmptyContextDependency) {
+  bool prev_allow_natives_syntax = v8_flags.allow_natives_syntax;
+  v8_flags.allow_natives_syntax = true;
+  bool prev_empty_context_extension_dep = v8_flags.empty_context_extension_dep;
+  v8_flags.empty_context_extension_dep = true;
+
+  const char* js_source = R"(
+    function f() {
+      var foo = 'abc';
+      function g(src) {
+        eval(src);
+        return foo;
+      }
+      return g;
+    };
+    var g = f();
+    %PrepareFunctionForOptimization(g);
+    g('') + 'def';
+    %OptimizeFunctionOnNextCall(g);
+    g('') + 'def';
+  )";
+  v8::ScriptCompiler::CachedData* cache =
+      CompileRunAndProduceCache(js_source, CodeCacheType::kAfterExecute);
+
+  v8::Isolate::CreateParams create_params;
+  create_params.array_buffer_allocator = CcTest::array_buffer_allocator();
+  v8::Isolate* isolate2 = v8::Isolate::New(create_params);
+
+  {
+    v8::Isolate::Scope iscope(isolate2);
+    v8::HandleScope scope(isolate2);
+    v8::Local<v8::Context> context = v8::Context::New(isolate2);
+    v8::Context::Scope context_scope(context);
+
+    v8::Local<v8::String> source_str = v8_str(js_source);
+    v8::ScriptOrigin origin(v8_str("test"));
+    v8::ScriptCompiler::Source source(source_str, origin, cache);
+    v8::Local<v8::UnboundScript> script;
+    {
+      script = v8::ScriptCompiler::CompileUnboundScript(
+                   isolate2, &source, v8::ScriptCompiler::kConsumeCodeCache)
+                   .ToLocalChecked();
+    }
+    CHECK(!cache->rejected);
+
+    DirectHandle<SharedFunctionInfo> sfi = v8::Utils::OpenDirectHandle(*script);
+    CHECK(sfi->HasBytecodeArray());
+
+    {
+      v8::Local<v8::Value> result = script->BindToCurrentContext()
+                                        ->Run(isolate2->GetCurrentContext())
+                                        .ToLocalChecked();
+      v8::Local<v8::String> result_string =
+          result->ToString(isolate2->GetCurrentContext()).ToLocalChecked();
+      CHECK(
+          result_string->Equals(isolate2->GetCurrentContext(), v8_str("abcdef"))
+              .FromJust());
+    }
+  }
+  isolate2->Dispose();
+
+  // Restore the flags.
+  v8_flags.allow_natives_syntax = prev_allow_natives_syntax;
+  v8_flags.empty_context_extension_dep = prev_empty_context_extension_dep;
+}
+
 TEST(CodeSerializerFlagChange) {
   const char* js_source = "function f() { return 'abc'; }; f() + 'def'";
   v8::ScriptCompiler::CachedData* cache = CompileRunAndProduceCache(js_source);
@@ -3289,7 +3365,7 @@ TEST(Regress503552) {
   Handle<String> source = isolate->factory()->NewStringFromAsciiChecked(
       "function f() {} function g() {}");
   AlignedCachedData* cached_data = nullptr;
-  Handle<SharedFunctionInfo> shared = CompileScriptAndProduceCache(
+  DirectHandle<SharedFunctionInfo> shared = CompileScriptAndProduceCache(
       isolate, source, ScriptDetails(), &cached_data,
       v8::ScriptCompiler::kNoCompileOptions);
   delete cached_data;
@@ -3297,7 +3373,7 @@ TEST(Regress503552) {
   heap::SimulateIncrementalMarking(isolate->heap());
 
   v8::ScriptCompiler::CachedData* cache_data =
-      CodeSerializer::Serialize(isolate, shared);
+      CodeSerializer::Serialize(isolate, indirect_handle(shared, isolate));
   delete cache_data;
 }
 
@@ -4526,7 +4602,7 @@ UNINITIALIZED_TEST(SerializeApiWrapperData) {
           context->Global()->Get(context, v8_str("obj1")).ToLocalChecked();
       CHECK(obj1->IsObject());
       v8::Local<v8::Value> obj2 =
-          context->Global()->Get(context, v8_str("obj1")).ToLocalChecked();
+          context->Global()->Get(context, v8_str("obj2")).ToLocalChecked();
       CHECK(obj2->IsObject());
       CHECK_EQ(nullptr, v8::Object::Unwrap<CppHeapPointerTag::kDefaultTag>(
                             isolate, obj1.As<v8::Object>()));
@@ -6277,7 +6353,7 @@ void CheckObjectsAreInSharedHeap(Isolate* isolate) {
         heap->MustBeInSharedOldSpace(obj) ||
         (IsString(obj) && String::IsInPlaceInternalizable(Cast<String>(obj)));
     if (expected_in_shared_old) {
-      CHECK(InAnySharedSpace(obj));
+      CHECK(HeapLayout::InAnySharedSpace(obj));
     }
   }
 }
@@ -6288,6 +6364,9 @@ UNINITIALIZED_TEST(SharedStrings) {
   // shared Isolate.
 
   if (!V8_CAN_CREATE_SHARED_HEAP_BOOL) return;
+  // In multi-cage mode we create one cage per isolate
+  // and we don't share objects between cages.
+  if (COMPRESS_POINTERS_IN_MULTIPLE_CAGES_BOOL) return;
 
   // Make all the flags that require a shared heap false before creating the
   // isolate to serialize.
@@ -6299,6 +6378,7 @@ UNINITIALIZED_TEST(SharedStrings) {
   isolate_to_serialize->Dispose();
 
   v8_flags.shared_string_table = true;
+  i::FlagList::EnforceFlagImplications();
 
   v8::Isolate* isolate1 = TestSerializer::NewIsolateFromBlob(blobs);
   v8::Isolate* isolate2 = TestSerializer::NewIsolateFromBlob(blobs);

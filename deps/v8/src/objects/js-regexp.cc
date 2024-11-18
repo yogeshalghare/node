@@ -111,7 +111,7 @@ Handle<JSRegExpResultIndices> JSRegExpResultIndices::BuildIndices(
   // result indices.
   DirectHandle<FixedArrayBase> elements =
       isolate->factory()->empty_fixed_array();
-  Handle<HeapObject> null = Cast<HeapObject>(isolate->factory()->null_value());
+  Handle<Null> null = isolate->factory()->null_value();
   DirectHandle<JSObject> js_group_names =
       isolate->factory()->NewSlowJSObjectWithPropertiesAndElements(
           null, group_names, elements);
@@ -300,7 +300,7 @@ MaybeHandle<String> EscapeRegExpSource(Isolate* isolate,
                                        Handle<String> source) {
   DCHECK(source->IsFlat());
   if (source->length() == 0) return isolate->factory()->query_colon_string();
-  bool one_byte = String::IsOneByteRepresentationUnderneath(*source);
+  bool one_byte = source->IsOneByteRepresentation();
   bool needs_escapes = false;
   int additional_escape_chars =
       one_byte ? CountAdditionalEscapeChars<uint8_t>(source, &needs_escapes)

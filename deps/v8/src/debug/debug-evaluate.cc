@@ -29,9 +29,8 @@ namespace v8 {
 namespace internal {
 
 namespace {
-static MaybeHandle<SharedFunctionInfo> GetFunctionInfo(Isolate* isolate,
-                                                       Handle<String> source,
-                                                       REPLMode repl_mode) {
+static MaybeDirectHandle<SharedFunctionInfo> GetFunctionInfo(
+    Isolate* isolate, Handle<String> source, REPLMode repl_mode) {
   ScriptDetails script_details(isolate->factory()->empty_string(),
                                ScriptOriginOptions(true, true));
   script_details.repl_mode = repl_mode;
@@ -46,7 +45,7 @@ MaybeHandle<Object> DebugEvaluate::Global(Isolate* isolate,
                                           Handle<String> source,
                                           debug::EvaluateGlobalMode mode,
                                           REPLMode repl_mode) {
-  Handle<SharedFunctionInfo> shared_info;
+  DirectHandle<SharedFunctionInfo> shared_info;
   if (!GetFunctionInfo(isolate, source, repl_mode).ToHandle(&shared_info)) {
     return MaybeHandle<Object>();
   }
@@ -695,6 +694,9 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     // DisposableStack builtins.
     case Builtin::kDisposableStackConstructor:
     case Builtin::kDisposableStackPrototypeGetDisposed:
+    // AsyncDisposableStack builtins.
+    case Builtin::kAsyncDisposableStackConstructor:
+    case Builtin::kAsyncDisposableStackPrototypeGetDisposed:
     // Map builtins.
     case Builtin::kMapConstructor:
     case Builtin::kMapGroupBy:
@@ -798,7 +800,6 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kStringPrototypeIsWellFormed:
     case Builtin::kStringPrototypeItalics:
     case Builtin::kStringPrototypeLastIndexOf:
-    case Builtin::kStringPrototypeLocaleCompare:
     case Builtin::kStringPrototypeLink:
     case Builtin::kStringPrototypeMatch:
     case Builtin::kStringPrototypeMatchAll:
@@ -824,10 +825,12 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kStringPrototypeToLocaleUpperCase:
 #ifdef V8_INTL_SUPPORT
     case Builtin::kStringToLowerCaseIntl:
+    case Builtin::kStringPrototypeLocaleCompareIntl:
     case Builtin::kStringPrototypeToLowerCaseIntl:
     case Builtin::kStringPrototypeToUpperCaseIntl:
     case Builtin::kStringPrototypeNormalizeIntl:
 #else
+    case Builtin::kStringPrototypeLocaleCompare:
     case Builtin::kStringPrototypeToLowerCase:
     case Builtin::kStringPrototypeToUpperCase:
     case Builtin::kStringPrototypeNormalize:
@@ -1016,6 +1019,12 @@ DebugInfo::SideEffectState BuiltinGetSideEffectState(Builtin id) {
     case Builtin::kDisposableStackPrototypeAdopt:
     case Builtin::kDisposableStackPrototypeDefer:
     case Builtin::kDisposableStackPrototypeMove:
+    // AsyncDisposableStack builtins.
+    case Builtin::kAsyncDisposableStackPrototypeUse:
+    case Builtin::kAsyncDisposableStackPrototypeDisposeAsync:
+    case Builtin::kAsyncDisposableStackPrototypeAdopt:
+    case Builtin::kAsyncDisposableStackPrototypeDefer:
+    case Builtin::kAsyncDisposableStackPrototypeMove:
     // RegExp builtins.
     case Builtin::kRegExpPrototypeTest:
     case Builtin::kRegExpPrototypeExec:
@@ -1129,7 +1138,12 @@ static bool TransitivelyCalledBuiltinHasNoSideEffect(Builtin caller,
       // Transitively called Builtins:
     case Builtin::kAbort:
     case Builtin::kAbortCSADcheck:
-    case Builtin::kAdaptorWithBuiltinExitFrame:
+    case Builtin::kAdaptorWithBuiltinExitFrame0:
+    case Builtin::kAdaptorWithBuiltinExitFrame1:
+    case Builtin::kAdaptorWithBuiltinExitFrame2:
+    case Builtin::kAdaptorWithBuiltinExitFrame3:
+    case Builtin::kAdaptorWithBuiltinExitFrame4:
+    case Builtin::kAdaptorWithBuiltinExitFrame5:
     case Builtin::kArrayConstructorImpl:
     case Builtin::kArrayEveryLoopContinuation:
     case Builtin::kArrayFilterLoopContinuation:
@@ -1321,9 +1335,8 @@ void DebugEvaluate::VerifyTransitiveBuiltins(Isolate* isolate) {
     }
   }
   CHECK(!failed);
-#if defined(V8_TARGET_ARCH_PPC) || defined(V8_TARGET_ARCH_PPC64) ||      \
-    defined(V8_TARGET_ARCH_MIPS64) || defined(V8_TARGET_ARCH_RISCV32) || \
-    defined(V8_TARGET_ARCH_RISCV64)
+#if defined(V8_TARGET_ARCH_PPC64) || defined(V8_TARGET_ARCH_MIPS64) || \
+    defined(V8_TARGET_ARCH_RISCV32) || defined(V8_TARGET_ARCH_RISCV64)
   // Isolate-independent builtin calls and jumps do not emit reloc infos
   // on PPC. We try to avoid using PC relative code due to performance
   // issue with especially older hardwares.

@@ -57,7 +57,7 @@ BUILTIN(DisposableStackPrototypeUse) {
   // 1. Let disposableStack be the this value.
   // 2. Perform ? RequireInternalSlot(disposableStack, [[DisposableState]]).
   CHECK_RECEIVER(JSSyncDisposableStack, disposable_stack, kMethodName);
-  Handle<Object> value = args.at(1);
+  Handle<JSAny> value = args.at<JSAny>(1);
 
   // use(value) does nothing when the value is null or undefined, so return
   // early.
@@ -253,10 +253,16 @@ BUILTIN(DisposableStackPrototypeMove) {
   new_disposable_stack->set_stack(disposable_stack->stack());
   new_disposable_stack->set_length(disposable_stack->length());
   new_disposable_stack->set_state(DisposableStackState::kPending);
+  new_disposable_stack->set_error(*(isolate->factory()->uninitialized_value()));
+  new_disposable_stack->set_error_message(
+      *(isolate->factory()->uninitialized_value()));
 
   // 7. Set disposableStack.[[DisposeCapability]] to NewDisposeCapability().
   disposable_stack->set_stack(ReadOnlyRoots(isolate).empty_fixed_array());
   disposable_stack->set_length(0);
+  disposable_stack->set_error(*(isolate->factory()->uninitialized_value()));
+  disposable_stack->set_error_message(
+      *(isolate->factory()->uninitialized_value()));
 
   // 8. Set disposableStack.[[DisposableState]] to disposed.
   disposable_stack->set_state(DisposableStackState::kDisposed);

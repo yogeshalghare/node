@@ -20,6 +20,8 @@
 namespace v8 {
 namespace internal {
 
+#include "src/codegen/define-code-stub-assembler-macros.inc"
+
 TNode<RawPtrT> StringBuiltinsAssembler::DirectStringData(
     TNode<String> string, TNode<Word32T> string_instance_type) {
   // Compute the effective offset of the first character.
@@ -1142,7 +1144,7 @@ void StringBuiltinsAssembler::MaybeCallFunctionAtSymbol(
   BIND(&out);
 }
 
-const TNode<Smi> StringBuiltinsAssembler::IndexOfDollarChar(
+TNode<Smi> StringBuiltinsAssembler::IndexOfDollarChar(
     const TNode<Context> context, const TNode<String> string) {
   const TNode<String> dollar_string = HeapConstantNoHole(
       isolate()->factory()->LookupSingleCharacterStringFromCode('$'));
@@ -1169,7 +1171,7 @@ TNode<String> StringBuiltinsAssembler::GetSubstitution(
   // TODO(jgruber): Possibly extend this in the future to handle more complex
   // cases without runtime calls.
 
-  const TNode<Smi> dollar_index = IndexOfDollarChar(context, replace_string);
+  TNode<Smi> dollar_index = IndexOfDollarChar(context, replace_string);
   Branch(SmiIsNegative(dollar_index), &out, &runtime);
 
   BIND(&runtime);
@@ -2098,6 +2100,8 @@ TNode<String> StringBuiltinsAssembler::SubString(TNode<String> string,
   BIND(&end);
   return var_result.value();
 }
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace internal
 }  // namespace v8

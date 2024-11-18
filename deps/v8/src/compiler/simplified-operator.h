@@ -17,7 +17,7 @@
 #include "src/compiler/globals.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/operator.h"
-#include "src/compiler/types.h"
+#include "src/compiler/turbofan-types.h"
 #include "src/compiler/write-barrier-kind.h"
 #include "src/deoptimizer/deoptimize-reason.h"
 #include "src/handles/handles.h"
@@ -716,35 +716,25 @@ struct FastApiCallFunction {
     return address == rhs.address && signature == rhs.signature;
   }
 };
-typedef ZoneVector<FastApiCallFunction> FastApiCallFunctionVector;
 
 class FastApiCallParameters {
  public:
-  explicit FastApiCallParameters(const FastApiCallFunctionVector& c_functions,
+  explicit FastApiCallParameters(FastApiCallFunction c_function,
                                  FeedbackSource const& feedback,
                                  CallDescriptor* descriptor)
-      : c_functions_(c_functions),
-        feedback_(feedback),
-        descriptor_(descriptor) {}
+      : c_function_(c_function), feedback_(feedback), descriptor_(descriptor) {}
 
-  const FastApiCallFunctionVector& c_functions() const { return c_functions_; }
+  FastApiCallFunction c_function() const { return c_function_; }
   FeedbackSource const& feedback() const { return feedback_; }
   CallDescriptor* descriptor() const { return descriptor_; }
-  const CFunctionInfo* signature() const {
-    DCHECK(!c_functions_.empty());
-    return c_functions_[0].signature;
-  }
+  const CFunctionInfo* signature() const { return c_function_.signature; }
   unsigned int argument_count() const {
     const unsigned int count = signature()->ArgumentCount();
-    DCHECK(base::all_of(c_functions_, [count](const auto& f) {
-      return f.signature->ArgumentCount() == count;
-    }));
     return count;
   }
 
  private:
-  // A single FastApiCall node can represent multiple overloaded functions.
-  const FastApiCallFunctionVector c_functions_;
+  FastApiCallFunction c_function_;
 
   const FeedbackSource feedback_;
   CallDescriptor* descriptor_;
@@ -939,6 +929,7 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* StringFromCodePointAt();
   const Operator* StringIndexOf();
   const Operator* StringLength();
+  const Operator* StringWrapperLength();
   const Operator* StringToLowerCaseIntl();
   const Operator* StringToUpperCaseIntl();
   const Operator* StringSubstring();
@@ -1182,7 +1173,7 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* IsNull(wasm::ValueType type);
   const Operator* IsNotNull(wasm::ValueType type);
   const Operator* Null(wasm::ValueType type);
-  const Operator* RttCanon(int index);
+  const Operator* RttCanon(wasm::ModuleTypeIndex index);
   const Operator* WasmTypeCheck(WasmTypeCheckConfig config);
   const Operator* WasmTypeCheckAbstract(WasmTypeCheckConfig config);
   const Operator* WasmTypeCast(WasmTypeCheckConfig config);
@@ -1214,9 +1205,9 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* Unsigned32Divide();
 
   // Represents the inputs necessary to construct a fast and a slow API call.
-  const Operator* FastApiCall(
-      const FastApiCallFunctionVector& c_candidate_functions,
-      FeedbackSource const& feedback, CallDescriptor* descriptor);
+  const Operator* FastApiCall(FastApiCallFunction c_function,
+                              FeedbackSource const& feedback,
+                              CallDescriptor* descriptor);
 
 #ifdef V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
   const Operator* GetContinuationPreservedEmbedderData();

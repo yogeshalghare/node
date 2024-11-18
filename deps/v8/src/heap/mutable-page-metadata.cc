@@ -4,6 +4,8 @@
 
 #include "src/heap/mutable-page-metadata.h"
 
+#include <new>
+
 #include "src/base/logging.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/platform.h"
@@ -17,20 +19,7 @@
 #include "src/heap/spaces.h"
 #include "src/objects/heap-object.h"
 
-namespace v8 {
-namespace internal {
-
-void MutablePageMetadata::DiscardUnusedMemory(Address addr, size_t size) {
-  base::AddressRegion memory_area =
-      MemoryAllocator::ComputeDiscardMemoryArea(addr, size);
-  if (memory_area.size() != 0) {
-    MemoryAllocator* memory_allocator = heap_->memory_allocator();
-    v8::PageAllocator* page_allocator =
-        memory_allocator->page_allocator(owner_identity());
-    CHECK(page_allocator->DiscardSystemPages(
-        reinterpret_cast<void*>(memory_area.begin()), memory_area.size()));
-  }
-}
+namespace v8::internal {
 
 MutablePageMetadata::MutablePageMetadata(Heap* heap, BaseSpace* space,
                                          size_t chunk_size, Address area_start,
@@ -46,17 +35,32 @@ MutablePageMetadata::MutablePageMetadata(Heap* heap, BaseSpace* space,
 
   if (page_size == PageSize::kRegular) {
     active_system_pages_ = new ActiveSystemPages;
-    active_system_pages_->Init(MemoryChunkLayout::kMemoryChunkHeaderSize,
-                               MemoryAllocator::GetCommitPageSizeBits(),
-                               size());
+    active_system_pages_->Init(
+        sizeof(MemoryChunk), MemoryAllocator::GetCommitPageSizeBits(), size());
   } else {
     // We do not track active system pages for large pages.
     active_system_pages_ = nullptr;
   }
 
-#ifdef DEBUG
-  ValidateOffsets(this);
-#endif
+  DCHECK_EQ(page_size == PageSize::kLarge, IsLargePage());
+
+  // TODO(sroettger): The following fields are accessed most often (AFAICT) and
+  // are moved to the end to occupy the same cache line as the slot set array.
+  // Without this change, there was a 0.5% performance impact after cache line
+  // aligning the metadata on x64 (before, the metadata started at offset 0x10).
+  // After reordering, the impact is still 0.1%/0.2% on jetstream2/speedometer3,
+  // so there should be some more optimization potential here.
+  // TODO(mlippautz): Replace 64 below with
+  // `hardware_destructive_interference_size` once supported.
+  static constexpr auto kOffsetOfFirstFastField =
+      offsetof(MutablePageMetadata, heap_);
+  static constexpr auto kOffsetOfLastFastField =
+      offsetof(MutablePageMetadata, slot_set_) +
+      sizeof(SlotSet*) * RememberedSetType::OLD_TO_NEW;
+  // This assert is merely necessary but not sufficient to guarantee that the
+  // fields sit on the same cacheline as the metadata object itself is
+  // dynamically allocated without alignment restrictions.
+  static_assert(kOffsetOfFirstFastField / 64 == kOffsetOfLastFastField / 64);
 }
 
 MemoryChunk::MainThreadFlags MutablePageMetadata::InitialFlags(
@@ -137,7 +141,7 @@ void MutablePageMetadata::ReleaseAllocatedMemoryNeededForWritableChunk() {
   ReleaseSlotSet(OLD_TO_NEW);
   ReleaseSlotSet(OLD_TO_NEW_BACKGROUND);
   ReleaseSlotSet(OLD_TO_OLD);
-  ReleaseSlotSet(OLD_TO_CODE);
+  ReleaseSlotSet(TRUSTED_TO_CODE);
   ReleaseSlotSet(OLD_TO_SHARED);
   ReleaseSlotSet(TRUSTED_TO_TRUSTED);
   ReleaseSlotSet(TRUSTED_TO_SHARED_TRUSTED);
@@ -222,56 +226,4 @@ int MutablePageMetadata::ComputeFreeListsLength() {
   return length;
 }
 
-#ifdef DEBUG
-void MutablePageMetadata::ValidateOffsets(MutablePageMetadata* chunk) {
-  // Note that we cannot use offsetof because MutablePageMetadata is not a POD.
-  DCHECK_EQ(
-      reinterpret_cast<Address>(&chunk->slot_set_) - chunk->MetadataAddress(),
-      MemoryChunkLayout::kSlotSetOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->progress_bar_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kProgressBarOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->live_byte_count_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kLiveByteCountOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->typed_slot_set_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kTypedSlotSetOffset);
-  DCHECK_EQ(
-      reinterpret_cast<Address>(&chunk->mutex_) - chunk->MetadataAddress(),
-      MemoryChunkLayout::kMutexOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->shared_mutex_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kSharedMutexOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->concurrent_sweeping_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kConcurrentSweepingOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->page_protection_change_mutex_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kPageProtectionChangeMutexOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->external_backing_store_bytes_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kExternalBackingStoreBytesOffset);
-  DCHECK_EQ(
-      reinterpret_cast<Address>(&chunk->list_node_) - chunk->MetadataAddress(),
-      MemoryChunkLayout::kListNodeOffset);
-  DCHECK_EQ(
-      reinterpret_cast<Address>(&chunk->categories_) - chunk->MetadataAddress(),
-      MemoryChunkLayout::kCategoriesOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->possibly_empty_buckets_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kPossiblyEmptyBucketsOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->active_system_pages_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kActiveSystemPagesOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->allocated_lab_size_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kAllocatedLabSizeOffset);
-  DCHECK_EQ(reinterpret_cast<Address>(&chunk->age_in_new_space_) -
-                chunk->MetadataAddress(),
-            MemoryChunkLayout::kAgeInNewSpaceOffset);
-}
-#endif
-
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal

@@ -41,6 +41,19 @@ bool HasOnlyStringMaps(JSHeapBroker* broker, ZoneVector<MapRef> const& maps) {
   return true;
 }
 
+bool HasOnlyStringWrapperMaps(JSHeapBroker* broker,
+                              ZoneVector<MapRef> const& maps) {
+  for (MapRef map : maps) {
+    if (!map.IsJSPrimitiveWrapperMap()) return false;
+    auto elements_kind = map.elements_kind();
+    if (elements_kind != FAST_STRING_WRAPPER_ELEMENTS &&
+        elements_kind != SLOW_STRING_WRAPPER_ELEMENTS) {
+      return false;
+    }
+  }
+  return true;
+}
+
 namespace {
 
 bool HasOnlyNumberMaps(JSHeapBroker* broker, ZoneVector<MapRef> const& maps) {
@@ -109,17 +122,34 @@ void PropertyAccessBuilder::BuildCheckMaps(Node* object, Effect* effect,
 }
 
 Node* PropertyAccessBuilder::BuildCheckValue(Node* receiver, Effect* effect,
-                                             Control control,
-                                             Handle<HeapObject> value) {
-  HeapObjectMatcher m(receiver);
-  if (m.Is(value)) return receiver;
-  Node* expected = jsgraph()->HeapConstantNoHole(value);
+                                             Control control, ObjectRef value) {
+  if (value.IsHeapObject()) {
+    HeapObjectMatcher m(receiver);
+    if (m.Is(value.AsHeapObject().object())) return receiver;
+  }
+  Node* expected = jsgraph()->ConstantNoHole(value, broker());
   Node* check =
       graph()->NewNode(simplified()->ReferenceEqual(), receiver, expected);
   *effect =
       graph()->NewNode(simplified()->CheckIf(DeoptimizeReason::kWrongValue),
                        check, *effect, control);
   return expected;
+}
+
+Node* PropertyAccessBuilder::BuildCheckSmi(Node* value, Effect* effect,
+                                           Control control,
+                                           FeedbackSource feedback_source) {
+  Node* smi_value = *effect = graph()->NewNode(
+      simplified()->CheckSmi(feedback_source), value, *effect, control);
+  return smi_value;
+}
+
+Node* PropertyAccessBuilder::BuildCheckNumber(Node* value, Effect* effect,
+                                              Control control,
+                                              FeedbackSource feedback_source) {
+  Node* number = *effect = graph()->NewNode(
+      simplified()->CheckNumber(feedback_source), value, *effect, control);
+  return number;
 }
 
 Node* PropertyAccessBuilder::ResolveHolder(
@@ -191,6 +221,12 @@ Node* PropertyAccessBuilder::TryFoldLoadConstantDataField(
   // If {access_info} has a holder, just use it.
   if (!holder.has_value()) {
     // Otherwise, try to match the {lookup_start_object} as a constant.
+    if (lookup_start_object->opcode() == IrOpcode::kCheckString ||
+        lookup_start_object->opcode() ==
+            IrOpcode::kCheckStringOrStringWrapper) {
+      // Bypassing Check inputs in order to allow constant folding.
+      lookup_start_object = lookup_start_object->InputAt(0);
+    }
     HeapObjectMatcher m(lookup_start_object);
     if (!m.HasResolvedValue() || !m.Ref(broker()).IsJSObject()) return nullptr;
 

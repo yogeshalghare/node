@@ -32,7 +32,16 @@ class Int64LoweringReducer : public Next {
     wasm::CallOrigin origin = __ data() -> is_js_to_wasm()
                                   ? wasm::kCalledFromJS
                                   : wasm::kCalledFromWasm;
-    sig_ = CreateMachineSignature(zone_, __ data()->wasm_sig(), origin);
+    // To compute the machine signature, it doesn't matter whether types
+    // are canonicalized, just use whichever signature is present (functions
+    // will have one and wrappers the other).
+    if (__ data()->wasm_module_sig()) {
+      sig_ =
+          CreateMachineSignature(zone_, __ data()->wasm_module_sig(), origin);
+    } else {
+      sig_ = CreateMachineSignature(zone_, __ data()->wasm_canonical_sig(),
+                                    origin);
+    }
 
     InitializeIndexMaps();
   }
@@ -538,7 +547,10 @@ class Int64LoweringReducer : public Next {
         auto [low, high] = Unpack(V<Word64>::Cast(inputs[i]));
         builder.AddInput(MachineType::Int32(), low);
         builder.AddInput(MachineType::Int32(), high);
-        if (i < inlined + function_info->parameter_count()) {
+        // Note that the first input (after the optional parent FrameState) is
+        // the JSClosure, so the first parameter is at index 1 (+1 in case of
+        // nested inlining).
+        if (i <= inlined + function_info->parameter_count()) {
           ++lowered_parameter_count;
         } else {
           ++lowered_local_count;
@@ -552,7 +564,8 @@ class Int64LoweringReducer : public Next {
     auto* function_info_lowered = zone->New<compiler::FrameStateFunctionInfo>(
         compiler::FrameStateType::kLiftoffFunction, lowered_parameter_count,
         function_info->max_arguments(), lowered_local_count,
-        function_info->shared_info(), function_info->wasm_liftoff_frame_size(),
+        function_info->shared_info(), kNullMaybeHandle,
+        function_info->wasm_liftoff_frame_size(),
         function_info->wasm_function_index());
     const FrameStateInfo& frame_state_info = data->frame_state_info;
     auto* frame_state_info_lowered = zone->New<compiler::FrameStateInfo>(

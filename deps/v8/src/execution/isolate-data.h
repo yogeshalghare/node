@@ -49,14 +49,14 @@ struct JSBuiltinDispatchHandleRoot {
 #define CASE(builtin_name, ...) k##builtin_name,
     BUILTINS_WITH_DISPATCH_LIST(CASE)
 
-        kEnd,
+        kCount,
     kFirst = 0
 #undef CASE
   };
 
   static inline Builtin to_builtin(Idx idx) {
 #define CASE(builtin_name, ...) Builtin::k##builtin_name,
-    return std::array<Builtin, Idx::kEnd>{
+    return std::array<Builtin, Idx::kCount>{
         BUILTINS_WITH_DISPATCH_LIST(CASE)}[idx];
 #undef CASE
   }
@@ -83,21 +83,7 @@ struct JSBuiltinDispatchHandleRoot {
         UNREACHABLE();
     }
   }
-
-  static constexpr size_t kPadding = Idx::kEnd * sizeof(JSDispatchHandle) %
-                                     kSystemPointerSize /
-                                     sizeof(JSDispatchHandle);
-  static constexpr size_t kTableSize = kEnd + kPadding;
 };
-
-#define ISOLATE_DATA_FIELDS_LEAPTIERING(V)                                \
-  V(BuiltinDispatchTable,                                                 \
-    (JSBuiltinDispatchHandleRoot::kTableSize) * sizeof(JSDispatchHandle), \
-    builtin_dispatch_table)
-
-#else
-
-#define ISOLATE_DATA_FIELDS_LEAPTIERING(V)
 
 #endif  // V8_ENABLE_LEAPTIERING
 
@@ -134,6 +120,7 @@ struct JSBuiltinDispatchHandleRoot {
   ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)                                   \
   ISOLATE_DATA_FIELDS_SANDBOX(V)                                               \
   V(ApiCallbackThunkArgument, kSystemPointerSize, api_callback_thunk_argument) \
+  V(RegexpExecVectorArgument, kSystemPointerSize, regexp_exec_vector_argument) \
   V(ContinuationPreservedEmbedderData, kSystemPointerSize,                     \
     continuation_preserved_embedder_data)                                      \
   /* Full tables (arbitrary size, potentially slower access). */               \
@@ -142,8 +129,7 @@ struct JSBuiltinDispatchHandleRoot {
     external_reference_table)                                                  \
   V(BuiltinEntryTable, Builtins::kBuiltinCount* kSystemPointerSize,            \
     builtin_entry_table)                                                       \
-  V(BuiltinTable, Builtins::kBuiltinCount* kSystemPointerSize, builtin_table)  \
-  ISOLATE_DATA_FIELDS_LEAPTIERING(V)
+  V(BuiltinTable, Builtins::kBuiltinCount* kSystemPointerSize, builtin_table)
 
 #ifdef V8_COMPRESS_POINTERS
 #define ISOLATE_DATA_FIELDS_POINTER_COMPRESSION(V)                             \
@@ -156,9 +142,10 @@ struct JSBuiltinDispatchHandleRoot {
 #endif  // V8_COMPRESS_POINTERS
 
 #ifdef V8_ENABLE_SANDBOX
-#define ISOLATE_DATA_FIELDS_SANDBOX(V)                      \
-  V(TrustedCageBase, kSystemPointerSize, trusted_cage_base) \
-  V(TrustedPointerTable, TrustedPointerTable::kSize, trusted_pointer_table)
+#define ISOLATE_DATA_FIELDS_SANDBOX(V)                                      \
+  V(TrustedCageBase, kSystemPointerSize, trusted_cage_base)                 \
+  V(TrustedPointerTable, TrustedPointerTable::kSize, trusted_pointer_table) \
+  V(SharedTrustedPointerTable, kSystemPointerSize, shared_trusted_pointer_table)
 #else
 #define ISOLATE_DATA_FIELDS_SANDBOX(V)
 #endif  // V8_ENABLE_SANDBOX
@@ -269,6 +256,9 @@ class IsolateData final {
   Address api_callback_thunk_argument() const {
     return api_callback_thunk_argument_;
   }
+  Address regexp_exec_vector_argument() const {
+    return regexp_exec_vector_argument_;
+  }
   Tagged<Object> continuation_preserved_embedder_data() const {
     return continuation_preserved_embedder_data_;
   }
@@ -283,12 +273,6 @@ class IsolateData final {
   ThreadLocalTop const& thread_local_top() const { return thread_local_top_; }
   Address* builtin_entry_table() { return builtin_entry_table_; }
   Address* builtin_table() { return builtin_table_; }
-#ifdef V8_ENABLE_LEAPTIERING
-  JSDispatchHandle builtin_dispatch_handle(Builtin builtin) {
-    return builtin_dispatch_table_[JSBuiltinDispatchHandleRoot::to_idx(
-        builtin)];
-  }
-#endif
   bool stack_is_iterable() const {
     DCHECK(stack_is_iterable_ == 0 || stack_is_iterable_ == 1);
     return stack_is_iterable_ != 0;
@@ -306,7 +290,7 @@ class IsolateData final {
 
 // Offset of a ThreadLocalTop member from {isolate_root()}.
 #define THREAD_LOCAL_TOP_MEMBER_OFFSET(Name)                              \
-  static uint32_t Name##_offset() {                                       \
+  static constexpr uint32_t Name##_offset() {                             \
     return static_cast<uint32_t>(IsolateData::thread_local_top_offset() + \
                                  OFFSET_OF(ThreadLocalTop, Name##_));     \
   }
@@ -433,7 +417,7 @@ class IsolateData final {
   // Tables containing pointers to objects outside of the V8 sandbox.
 #ifdef V8_COMPRESS_POINTERS
   ExternalPointerTable external_pointer_table_;
-  ExternalPointerTable* shared_external_pointer_table_;
+  ExternalPointerTable* shared_external_pointer_table_ = nullptr;
   CppHeapPointerTable cpp_heap_pointer_table_;
 #endif  // V8_COMPRESS_POINTERS
 
@@ -441,11 +425,17 @@ class IsolateData final {
   const Address trusted_cage_base_;
 
   TrustedPointerTable trusted_pointer_table_;
+  TrustedPointerTable* shared_trusted_pointer_table_ = nullptr;
 #endif  // V8_ENABLE_SANDBOX
 
   // This is a storage for an additional argument for the Api callback thunk
   // functions, see InvokeAccessorGetterCallback and InvokeFunctionCallback.
   Address api_callback_thunk_argument_ = kNullAddress;
+
+  // Storage for an additional (untagged) argument for
+  // Runtime::kRegExpExecInternal2, required since runtime functions only
+  // accept tagged arguments.
+  Address regexp_exec_vector_argument_ = kNullAddress;
 
   // This is data that should be preserved on newly created continuations.
   Tagged<Object> continuation_preserved_embedder_data_ = Smi::zero();
@@ -461,11 +451,6 @@ class IsolateData final {
 
   // The entries in this array are tagged pointers to Code objects.
   Address builtin_table_[Builtins::kBuiltinCount] = {};
-#ifdef V8_ENABLE_LEAPTIERING
-  JSDispatchHandle* builtin_dispatch_table() { return builtin_dispatch_table_; }
-  JSDispatchHandle
-      builtin_dispatch_table_[JSBuiltinDispatchHandleRoot::kTableSize] = {};
-#endif
 
   // Ensure the size is 8-byte aligned in order to make alignment of the field
   // following the IsolateData field predictable. This solves the issue with

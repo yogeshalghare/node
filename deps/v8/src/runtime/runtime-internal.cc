@@ -16,13 +16,8 @@
 #include "src/logging/counters.h"
 #include "src/numbers/conversions.h"
 #include "src/objects/template-objects-inl.h"
+#include "src/runtime/runtime-utils.h"
 #include "src/utils/ostreams.h"
-
-#if V8_ENABLE_WEBASSEMBLY
-// TODO(chromium:1236668): Drop this when the "SaveAndClearThreadInWasmFlag"
-// approach is no longer needed.
-#include "src/trap-handler/trap-handler.h"
-#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8 {
 namespace internal {
@@ -439,34 +434,6 @@ RUNTIME_FUNCTION(Runtime_BytecodeBudgetInterruptWithStackCheck_Maglev) {
   return BytecodeBudgetInterruptWithStackCheck(isolate, args, CodeKind::MAGLEV);
 }
 
-namespace {
-
-#if V8_ENABLE_WEBASSEMBLY
-class V8_NODISCARD SaveAndClearThreadInWasmFlag {
- public:
-  SaveAndClearThreadInWasmFlag() {
-    if (trap_handler::IsTrapHandlerEnabled()) {
-      if (trap_handler::IsThreadInWasm()) {
-        thread_was_in_wasm_ = true;
-        trap_handler::ClearThreadInWasm();
-      }
-    }
-  }
-  ~SaveAndClearThreadInWasmFlag() {
-    if (thread_was_in_wasm_) {
-      trap_handler::SetThreadInWasm();
-    }
-  }
-
- private:
-  bool thread_was_in_wasm_{false};
-};
-#else
-class SaveAndClearThreadInWasmFlag {};
-#endif  // V8_ENABLE_WEBASSEMBLY
-
-}  // namespace
-
 RUNTIME_FUNCTION(Runtime_AllocateInYoungGeneration) {
   HandleScope scope(isolate);
   DCHECK(isolate->IsOnCentralStack());
@@ -479,13 +446,11 @@ RUNTIME_FUNCTION(Runtime_AllocateInYoungGeneration) {
   CHECK(IsAligned(size, kTaggedSize));
   CHECK_GT(size, 0);
 
-#if V8_ENABLE_WEBASSEMBLY
   // When this is called from WasmGC code, clear the "thread in wasm" flag,
   // which is important in case any GC needs to happen.
   // TODO(chromium:1236668): Find a better fix, likely by replacing the global
   // flag.
-  SaveAndClearThreadInWasmFlag clear_wasm_flag;
-#endif  // V8_ENABLE_WEBASSEMBLY
+  SaveAndClearThreadInWasmFlag clear_wasm_flag(isolate);
 
   // TODO(v8:9472): Until double-aligned allocation is fixed for new-space
   // allocations, don't request it.
@@ -673,8 +638,8 @@ RUNTIME_FUNCTION(Runtime_GetAndResetRuntimeCallStats) {
 RUNTIME_FUNCTION(Runtime_OrdinaryHasInstance) {
   HandleScope scope(isolate);
   DCHECK_EQ(2, args.length());
-  Handle<Object> callable = args.at(0);
-  Handle<Object> object = args.at(1);
+  Handle<JSAny> callable = args.at<JSAny>(0);
+  Handle<JSAny> object = args.at<JSAny>(1);
   RETURN_RESULT_OR_FAILURE(
       isolate, Object::OrdinaryHasInstance(isolate, callable, object));
 }
@@ -699,9 +664,9 @@ RUNTIME_FUNCTION(Runtime_CreateAsyncFromSyncIterator) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
 
-  Handle<Object> sync_iterator = args.at(0);
-
-  if (!IsJSReceiver(*sync_iterator)) {
+  Handle<JSAny> sync_iterator_any = args.at<JSAny>(0);
+  Handle<JSReceiver> sync_iterator;
+  if (!TryCast<JSReceiver>(sync_iterator_any, &sync_iterator)) {
     THROW_NEW_ERROR_RETURN_FAILURE(
         isolate, NewTypeError(MessageTemplate::kSymbolIteratorInvalid));
   }
@@ -712,8 +677,7 @@ RUNTIME_FUNCTION(Runtime_CreateAsyncFromSyncIterator) {
       Object::GetProperty(isolate, sync_iterator,
                           isolate->factory()->next_string()));
 
-  return *isolate->factory()->NewJSAsyncFromSyncIterator(
-      Cast<JSReceiver>(sync_iterator), next);
+  return *isolate->factory()->NewJSAsyncFromSyncIterator(sync_iterator, next);
 }
 
 RUNTIME_FUNCTION(Runtime_GetTemplateObject) {
@@ -784,14 +748,14 @@ RUNTIME_FUNCTION(Runtime_SharedValueBarrierSlow) {
   return *shared_value;
 }
 
-RUNTIME_FUNCTION(Runtime_InvalidateDependentCodeForConstTrackingLet) {
+RUNTIME_FUNCTION(Runtime_InvalidateDependentCodeForScriptContextSlot) {
   HandleScope scope(isolate);
   DCHECK_EQ(1, args.length());
   auto const_tracking_let_cell =
-      Cast<ConstTrackingLetCell>(args.at<HeapObject>(0));
+      Cast<ContextSidePropertyCell>(args.at<HeapObject>(0));
   DependentCode::DeoptimizeDependencyGroups(
       isolate, *const_tracking_let_cell,
-      DependentCode::kConstTrackingLetChangedGroup);
+      DependentCode::kScriptContextSlotPropertyChangedGroup);
   return ReadOnlyRoots(isolate).undefined_value();
 }
 

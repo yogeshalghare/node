@@ -4,6 +4,9 @@
 
 namespace array {
 
+const kArrayFromAsync: constexpr UseCounterFeature
+    generates 'v8::Isolate::kArrayFromAsync';
+
 extern enum ArrayFromAsyncLabels extends uint31
     constexpr 'ArrayBuiltins::ArrayFromAsyncLabels' {
   kGetIteratorStep,
@@ -92,7 +95,7 @@ extern enum ArrayFromAsyncIterableResolveContextSlots extends intptr
 }
 
 extern macro AllocateRootFunctionWithContext(
-    constexpr intptr, FunctionContext): JSFunction;
+    constexpr intptr, FunctionContext, NativeContext): JSFunction;
 
 const kArrayFromAsyncIterableOnFulfilledSharedFun: constexpr intptr
     generates 'RootIndex::kArrayFromAsyncIterableOnFulfilledSharedFun';
@@ -139,13 +142,15 @@ macro CreateArrayFromAsyncIterableResolveContext(
       ArrayFromAsyncIterableResolveContextSlots::
           kArrayFromAsyncIterableResolveOnFulfilledFunctionSlot,
       AllocateRootFunctionWithContext(
-          kArrayFromAsyncIterableOnFulfilledSharedFun, resolveContext));
+          kArrayFromAsyncIterableOnFulfilledSharedFun, resolveContext,
+          nativeContext));
   InitContextSlot(
       resolveContext,
       ArrayFromAsyncIterableResolveContextSlots::
           kArrayFromAsyncIterableResolveOnRejectedFunctionSlot,
       AllocateRootFunctionWithContext(
-          kArrayFromAsyncIterableOnRejectedSharedFun, resolveContext));
+          kArrayFromAsyncIterableOnRejectedSharedFun, resolveContext,
+          nativeContext));
   InitContextSlot(
       resolveContext,
       ArrayFromAsyncIterableResolveContextSlots::
@@ -559,13 +564,15 @@ macro CreateArrayFromAsyncArrayLikeResolveContext(
       ArrayFromAsyncArrayLikeResolveContextSlots::
           kArrayFromAsyncArrayLikeResolveOnFulfilledFunctionSlot,
       AllocateRootFunctionWithContext(
-          kArrayFromAsyncArrayLikeOnFulfilledSharedFun, resolveContext));
+          kArrayFromAsyncArrayLikeOnFulfilledSharedFun, resolveContext,
+          nativeContext));
   InitContextSlot(
       resolveContext,
       ArrayFromAsyncArrayLikeResolveContextSlots::
           kArrayFromAsyncArrayLikeResolveOnRejectedFunctionSlot,
       AllocateRootFunctionWithContext(
-          kArrayFromAsyncArrayLikeOnRejectedSharedFun, resolveContext));
+          kArrayFromAsyncArrayLikeOnRejectedSharedFun, resolveContext,
+          nativeContext));
   InitContextSlot(
       resolveContext,
       ArrayFromAsyncArrayLikeResolveContextSlots::
@@ -802,6 +809,7 @@ extern macro ArrayFromAsyncArrayLikeOnRejectedSharedFunConstant():
 // is available in go/array-from-async-implementation.
 transitioning javascript builtin ArrayFromAsync(
     js-implicit context: NativeContext, receiver: JSAny)(...arguments): JSAny {
+  IncrementUseCounter(context, SmiConstant(kArrayFromAsync));
   // 1. Let C be the this value.
   const c = HasBuiltinSubclassingFlag() ? receiver : GetArrayFunction();
 

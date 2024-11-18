@@ -12,6 +12,7 @@
 #include "src/common/assert-scope.h"
 #include "src/compiler/bytecode-analysis.h"
 #include "src/compiler/common-operator.h"
+#include "src/compiler/compilation-dependencies.h"
 #include "src/compiler/compiler-source-position-table.h"
 #include "src/compiler/js-heap-broker.h"
 #include "src/compiler/js-type-hint-lowering.h"
@@ -410,7 +411,7 @@ class BytecodeGraphBuilder {
     return frame_state_function_info_;
   }
   SourcePositionTableIterator& source_position_iterator() {
-    return *source_position_iterator_;
+    return source_position_iterator_;
   }
   interpreter::BytecodeArrayIterator const& bytecode_iterator() const {
     return bytecode_iterator_;
@@ -446,7 +447,7 @@ class BytecodeGraphBuilder {
   SharedFunctionInfoRef shared_info() const { return shared_info_; }
 
 #define DECLARE_VISIT_BYTECODE(name, ...) void Visit##name();
-  BYTECODE_LIST(DECLARE_VISIT_BYTECODE)
+  BYTECODE_LIST(DECLARE_VISIT_BYTECODE, DECLARE_VISIT_BYTECODE)
 #undef DECLARE_VISIT_BYTECODE
 
   JSHeapBroker* const broker_;
@@ -462,7 +463,7 @@ class BytecodeGraphBuilder {
   CallFrequency const invocation_frequency_;
   JSTypeHintLowering const type_hint_lowering_;
   const FrameStateFunctionInfo* const frame_state_function_info_;
-  std::unique_ptr<SourcePositionTableIterator> source_position_iterator_;
+  SourcePositionTableIterator source_position_iterator_;
   interpreter::BytecodeArrayIterator bytecode_iterator_;
   BytecodeAnalysis const bytecode_analysis_;
   Environment* environment_;
@@ -1069,9 +1070,9 @@ BytecodeGraphBuilder::BytecodeGraphBuilder(
       frame_state_function_info_(common()->CreateFrameStateFunctionInfo(
           FrameStateType::kUnoptimizedFunction,
           bytecode_array().parameter_count(), bytecode_array().max_arguments(),
-          bytecode_array().register_count(), shared_info.object())),
-      source_position_iterator_(std::make_unique<SourcePositionTableIterator>(
-          bytecode_array().SourcePositionTable(broker))),
+          bytecode_array().register_count(), shared_info.object(),
+          bytecode_array().object())),
+      source_position_iterator_(bytecode_array().SourcePositionTable(broker)),
       bytecode_iterator_(bytecode_array().object()),
       bytecode_analysis_(
           bytecode_array().object(), local_zone, osr_offset,
@@ -1467,7 +1468,7 @@ void BytecodeGraphBuilder::VisitSingleBytecode() {
   case interpreter::Bytecode::k##name: \
     Visit##name();                     \
     break;
-      BYTECODE_LIST(BYTECODE_CASE)
+      BYTECODE_LIST(BYTECODE_CASE, BYTECODE_CASE)
 #undef BYTECODE_CASE
     }
   }
@@ -1687,6 +1688,17 @@ void BytecodeGraphBuilder::VisitLdaContextSlot() {
   environment()->BindAccumulator(node);
 }
 
+void BytecodeGraphBuilder::VisitLdaScriptContextSlot() {
+  const Operator* op = javascript()->LoadScriptContext(
+      bytecode_iterator().GetUnsignedImmediateOperand(2),
+      bytecode_iterator().GetIndexOperand(1));
+  Node* node = NewNode(op);
+  Node* context =
+      environment()->LookupRegister(bytecode_iterator().GetRegisterOperand(0));
+  NodeProperties::ReplaceContextInput(node, context);
+  environment()->BindAccumulator(node);
+}
+
 void BytecodeGraphBuilder::VisitLdaImmutableContextSlot() {
   const Operator* op = javascript()->LoadContext(
       bytecode_iterator().GetUnsignedImmediateOperand(2),
@@ -1701,6 +1713,13 @@ void BytecodeGraphBuilder::VisitLdaImmutableContextSlot() {
 void BytecodeGraphBuilder::VisitLdaCurrentContextSlot() {
   const Operator* op = javascript()->LoadContext(
       0, bytecode_iterator().GetIndexOperand(0), false);
+  Node* node = NewNode(op);
+  environment()->BindAccumulator(node);
+}
+
+void BytecodeGraphBuilder::VisitLdaCurrentScriptContextSlot() {
+  const Operator* op = javascript()->LoadScriptContext(
+      0, bytecode_iterator().GetIndexOperand(0));
   Node* node = NewNode(op);
   environment()->BindAccumulator(node);
 }
@@ -1838,7 +1857,10 @@ BytecodeGraphBuilder::Environment* BytecodeGraphBuilder::CheckContextExtensions(
     DCHECK_NE(scope_info.scope_type(), ScopeType::SCRIPT_SCOPE);
     DCHECK_NE(scope_info.scope_type(), ScopeType::REPL_MODE_SCOPE);
 
-    if (scope_info.HasContextExtensionSlot()) {
+    if (scope_info.HasContextExtensionSlot() &&
+        !broker()->dependencies()->DependOnEmptyContextExtension(scope_info)) {
+      // Using EmptyContextExtension dependency is not possible for this
+      // scope_info, so generate dynamic checks.
       slow_environment = CheckContextExtensionAtDepth(slow_environment, d);
     }
     DCHECK_IMPLIES(!scope_info.HasOuterScopeInfo(), d + 1 == depth);
@@ -1847,9 +1869,11 @@ BytecodeGraphBuilder::Environment* BytecodeGraphBuilder::CheckContextExtensions(
     }
   }
 
-  // There should have been at least one slow path generated, otherwise we could
-  // have already skipped the lookup in the bytecode.
-  DCHECK_NOT_NULL(slow_environment);
+  // There should have been at least one slow path generated, otherwise we
+  // could have already skipped the lookup in the bytecode. The only exception
+  // is if we replaced all the dynamic checks with code dependencies.
+  DCHECK_IMPLIES(!v8_flags.empty_context_extension_dep,
+                 slow_environment != nullptr);
   return slow_environment;
 }
 
@@ -1896,8 +1920,13 @@ void BytecodeGraphBuilder::BuildLdaLookupContextSlot(TypeofMode typeof_mode) {
   {
     uint32_t slot_index = bytecode_iterator().GetIndexOperand(1);
 
+    // TODO(victorgomes): Emit LoadScriptContext if ContextKind::kScriptContext.
     const Operator* op = javascript()->LoadContext(depth, slot_index, false);
     environment()->BindAccumulator(NewNode(op));
+  }
+  if (!slow_environment) {
+    // The slow path was fully replaced by a set of compilation dependencies.
+    return;
   }
 
   // Add a merge to the fast environment.
@@ -1929,7 +1958,15 @@ void BytecodeGraphBuilder::VisitLdaLookupContextSlot() {
   BuildLdaLookupContextSlot(TypeofMode::kNotInside);
 }
 
+void BytecodeGraphBuilder::VisitLdaLookupScriptContextSlot() {
+  BuildLdaLookupContextSlot(TypeofMode::kNotInside);
+}
+
 void BytecodeGraphBuilder::VisitLdaLookupContextSlotInsideTypeof() {
+  BuildLdaLookupContextSlot(TypeofMode::kInside);
+}
+
+void BytecodeGraphBuilder::VisitLdaLookupScriptContextSlotInsideTypeof() {
   BuildLdaLookupContextSlot(TypeofMode::kInside);
 }
 
@@ -1946,6 +1983,10 @@ void BytecodeGraphBuilder::BuildLdaLookupGlobalSlot(TypeofMode typeof_mode) {
     uint32_t feedback_slot_index = bytecode_iterator().GetIndexOperand(1);
     Node* node = BuildLoadGlobal(name, feedback_slot_index, typeof_mode);
     environment()->BindAccumulator(node, Environment::kAttachFrameState);
+  }
+  if (!slow_environment) {
+    // The slow path was fully replaced by a set of compilation dependencies.
+    return;
   }
 
   // Add a merge to the fast environment.

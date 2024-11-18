@@ -17,10 +17,12 @@ namespace internal {
 namespace maglev {
 class MaglevGraphBuilder;
 class StoreDoubleField;
+class StoreScriptContextSlotWithWriteBarrier;
 }  // namespace maglev
 
 namespace compiler {
 class GraphAssembler;
+class JSContextSpecialization;
 }  // namespace compiler
 
 // The HeapNumber class describes heap allocated numbers that cannot be
@@ -58,8 +60,10 @@ V8_OBJECT class HeapNumber : public PrimitiveHeapObject {
   friend class maglev::MaglevAssembler;
   friend class maglev::MaglevGraphBuilder;
   friend class maglev::StoreDoubleField;
+  friend class maglev::StoreScriptContextSlotWithWriteBarrier;
   friend class compiler::AccessBuilder;
   friend class compiler::GraphAssembler;
+  friend class compiler::JSContextSpecialization;
   friend class TorqueGeneratedHeapNumberAsserts;
   friend AllocationAlignment HeapObject::RequiredAlignment(Tagged<Map> map);
 

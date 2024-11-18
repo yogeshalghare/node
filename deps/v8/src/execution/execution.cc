@@ -208,13 +208,10 @@ MaybeHandle<Context> NewScriptContext(
       if (IsLexicalVariableMode(mode) || IsLexicalVariableMode(lookup.mode)) {
         DirectHandle<Context> context(script_context->get(lookup.context_index),
                                       isolate);
-        // If we are trying to re-declare a REPL-mode let as a let or REPL-mode
-        // const as a const, allow it.
-        // TODO(rezvan): Add check and related tests for VariableMode::kUsing.
-        if (!(((mode == VariableMode::kLet &&
-                lookup.mode == VariableMode::kLet) ||
-               (mode == VariableMode::kConst &&
-                lookup.mode == VariableMode::kConst)) &&
+        // If we are trying to re-declare a REPL-mode let as a let, REPL-mode
+        // const as a const, REPL-mode using as a using and REPL-mode await
+        // using as an await using allow it.
+        if (!((mode == lookup.mode && IsLexicalVariableMode(mode)) &&
               scope_info->IsReplModeScope() &&
               context->scope_info()->IsReplModeScope())) {
           // ES#sec-globaldeclarationinstantiation 5.b:
@@ -257,8 +254,8 @@ MaybeHandle<Context> NewScriptContext(
       isolate->factory()->NewScriptContext(native_context, scope_info);
 
   result->Initialize(isolate);
-  // In REPL mode, we are allowed to add/modify let/const variables.
-  // We use the previous defined script context for those.
+  // In REPL mode, we are allowed to add/modify let/const/using/await using
+  // variables. We use the previous defined script context for those.
   const bool ignore_duplicates = scope_info->IsReplModeScope();
   DirectHandle<ScriptContextTable> new_script_context_table =
       ScriptContextTable::Add(isolate, script_context, result,
@@ -530,17 +527,20 @@ MaybeHandle<Object> Execution::CallBuiltin(Isolate* isolate,
 }
 
 // static
-MaybeHandle<Object> Execution::New(Isolate* isolate, Handle<Object> constructor,
-                                   int argc, Handle<Object> argv[]) {
+MaybeHandle<JSReceiver> Execution::New(Isolate* isolate,
+                                       Handle<Object> constructor, int argc,
+                                       Handle<Object> argv[]) {
   return New(isolate, constructor, constructor, argc, argv);
 }
 
 // static
-MaybeHandle<Object> Execution::New(Isolate* isolate, Handle<Object> constructor,
-                                   Handle<Object> new_target, int argc,
-                                   Handle<Object> argv[]) {
-  return Invoke(isolate, InvokeParams::SetUpForNew(isolate, constructor,
-                                                   new_target, argc, argv));
+MaybeHandle<JSReceiver> Execution::New(Isolate* isolate,
+                                       Handle<Object> constructor,
+                                       Handle<Object> new_target, int argc,
+                                       Handle<Object> argv[]) {
+  return Cast<JSReceiver>(Invoke(
+      isolate,
+      InvokeParams::SetUpForNew(isolate, constructor, new_target, argc, argv)));
 }
 
 // static
@@ -591,7 +591,7 @@ static_assert(sizeof(StackHandlerMarker) == StackHandlerConstants::kSize);
 
 #if V8_ENABLE_WEBASSEMBLY
 void Execution::CallWasm(Isolate* isolate, DirectHandle<Code> wrapper_code,
-                         Address wasm_call_target,
+                         WasmCodePointer wasm_call_target,
                          DirectHandle<Object> object_ref, Address packed_args) {
   using WasmEntryStub = GeneratedCode<Address(
       Address target, Address object_ref, Address argv, Address c_entry_fp)>;

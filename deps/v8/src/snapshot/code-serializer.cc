@@ -75,7 +75,10 @@ ScriptCompiler::CachedData* CodeSerializer::Serialize(
   CodeSerializer cs(isolate, SerializedCodeData::SourceHash(
                                  source, script->origin_options()));
   DisallowGarbageCollection no_gc;
+
+#ifndef DEBUG
   cs.reference_map()->AddAttachedReference(*source);
+#endif
   AlignedCachedData* cached_data = cs.SerializeSharedFunctionInfo(info);
 
   if (v8_flags.profile_deserialization) {
@@ -180,7 +183,10 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
       }
       if (v8_flags.profile_guided_optimization) {
         cached_tiering_decision = sfi->cached_tiering_decision();
-        sfi->set_cached_tiering_decision(CachedTieringDecision::kPending);
+        if (cached_tiering_decision > CachedTieringDecision::kEarlySparkplug) {
+          sfi->set_cached_tiering_decision(
+              CachedTieringDecision::kEarlySparkplug);
+        }
       }
     }
     SerializeGeneric(obj, slot_type);
@@ -190,7 +196,8 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
       sfi->SetActiveBytecodeArray(debug_info->DebugBytecodeArray(isolate()),
                                   isolate());
     }
-    if (v8_flags.profile_guided_optimization) {
+    if (v8_flags.profile_guided_optimization &&
+        cached_tiering_decision > CachedTieringDecision::kEarlySparkplug) {
       sfi->set_cached_tiering_decision(cached_tiering_decision);
     }
     return;
@@ -211,6 +218,31 @@ void CodeSerializer::SerializeObjectImpl(Handle<HeapObject> obj,
     data->set_job(kNullAddress);
     SerializeGeneric(data, slot_type);
     data->set_job(job);
+    return;
+  } else if (InstanceTypeChecker::IsScopeInfo(instance_type)) {
+    // TODO(ishell): define a dedicated instance type for DependentCode and
+    // serialize DependentCode objects as an empty_dependent_code instead
+    // of customizing ScopeInfo serialization.
+    static_assert(DEPENDENT_CODE_TYPE == WEAK_ARRAY_LIST_TYPE);
+    Handle<ScopeInfo> scope_info = Cast<ScopeInfo>(obj);
+    Handle<DependentCode> dependent_code;
+    bool restore_dependent_code = false;
+    if (scope_info->SloppyEvalCanExtendVars()) {
+      // If |scope_info| has a dependent code field, serialize it as an empty
+      // dependent code in order to avoid accidental serialization of optimized
+      // code.
+      Tagged<DependentCode> empty_dependent_code =
+          DependentCode::empty_dependent_code(ReadOnlyRoots(isolate()));
+      if (scope_info->dependent_code() != empty_dependent_code) {
+        dependent_code = handle(scope_info->dependent_code(), isolate());
+        restore_dependent_code = true;
+        scope_info->set_dependent_code(empty_dependent_code);
+      }
+    }
+    SerializeGeneric(scope_info, slot_type);
+    if (restore_dependent_code) {
+      scope_info->set_dependent_code(*dependent_code);
+    }
     return;
   }
 
@@ -316,7 +348,7 @@ class StressOffThreadDeserializeThread final : public base::Thread {
         CodeSerializer::StartDeserializeOffThread(&local_isolate, cached_data_);
   }
 
-  MaybeHandle<SharedFunctionInfo> Finalize(
+  MaybeDirectHandle<SharedFunctionInfo> Finalize(
       Isolate* isolate, DirectHandle<String> source,
       const ScriptDetails& script_details) {
     return CodeSerializer::FinishOffThreadDeserialize(
@@ -403,7 +435,8 @@ void BaselineBatchCompileIfSparkplugCompiled(Isolate* isolate,
     SharedFunctionInfo::ScriptIterator iter(isolate, script);
     for (Tagged<SharedFunctionInfo> info = iter.Next(); !info.is_null();
          info = iter.Next()) {
-      if (info->sparkplug_compiled() && CanCompileWithBaseline(isolate, info)) {
+      if (info->cached_tiering_decision() != CachedTieringDecision::kPending &&
+          CanCompileWithBaseline(isolate, info)) {
         isolate->baseline_batch_compiler()->EnqueueSFI(info);
       }
     }
@@ -437,7 +470,7 @@ const char* ToString(SerializedCodeSanityCheckResult result) {
 }
 }  // namespace
 
-MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
+MaybeDirectHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
     Isolate* isolate, AlignedCachedData* cached_data, Handle<String> source,
     const ScriptDetails& script_details,
     MaybeHandle<Script> maybe_cached_script) {
@@ -473,14 +506,14 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::Deserialize(
   }
 
   // Deserialize.
-  MaybeHandle<SharedFunctionInfo> maybe_result =
+  MaybeDirectHandle<SharedFunctionInfo> maybe_result =
       ObjectDeserializer::DeserializeSharedFunctionInfo(isolate, &scd, source);
 
-  Handle<SharedFunctionInfo> result;
+  DirectHandle<SharedFunctionInfo> result;
   if (!maybe_result.ToHandle(&result)) {
     // Deserializing may fail if the reservations cannot be fulfilled.
     if (v8_flags.profile_deserialization) PrintF("[Deserializing failed]\n");
-    return MaybeHandle<SharedFunctionInfo>();
+    return MaybeDirectHandle<SharedFunctionInfo>();
   }
 
   // Check whether the newly deserialized data should be merged into an
@@ -548,7 +581,7 @@ CodeSerializer::StartDeserializeOffThread(LocalIsolate* local_isolate,
     return result;
   }
 
-  MaybeHandle<SharedFunctionInfo> local_maybe_result =
+  MaybeDirectHandle<SharedFunctionInfo> local_maybe_result =
       OffThreadObjectDeserializer::DeserializeSharedFunctionInfo(
           local_isolate, &scd, &result.scripts);
 
@@ -628,11 +661,20 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
   } else {
     DirectHandle<Script> script(Cast<Script>(result->script()), isolate);
     // Fix up the source on the script. This should be the only deserialized
-    // script, and the off-thread deserializer should have set its source to
-    // the empty string.
+    // script, and the off-thread deserializer should have set its source to the
+    // empty string. In debug mode the code cache does contain the original
+    // source.
     DCHECK_EQ(data.scripts.size(), 1);
     DCHECK_EQ(*script, *data.scripts[0]);
-    DCHECK_EQ(script->source(), ReadOnlyRoots(isolate).empty_string());
+#ifdef DEBUG
+    if (!Cast<String>(script->source())->Equals(*source)) {
+      isolate->PushStackTraceAndDie(
+          reinterpret_cast<void*>(script->source().ptr()),
+          reinterpret_cast<void*>(source->ptr()));
+    }
+#else
+    CHECK_EQ(script->source(), ReadOnlyRoots(isolate).empty_string());
+#endif
     Script::SetSource(isolate, script, source);
 
     // Fix up the script list to include the newly deserialized script.
@@ -642,7 +684,7 @@ MaybeHandle<SharedFunctionInfo> CodeSerializer::FinishOffThreadDeserialize(
       BaselineBatchCompileIfSparkplugCompiled(isolate, *script);
       DCHECK(data.persistent_handles->Contains(script.location()));
       list = WeakArrayList::AddToEnd(isolate, list,
-                                     MaybeObjectHandle::Weak(script));
+                                     MaybeObjectDirectHandle::Weak(script));
     }
     isolate->heap()->SetRootScriptList(*list);
   }

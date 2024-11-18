@@ -228,12 +228,8 @@ class MaglevGraphBuilder {
         compilation_unit_->shared_function_info().scope_info(broker());
     if (scope_info.HasOuterScopeInfo()) {
       scope_info = scope_info.OuterScopeInfo(broker());
-      while (!scope_info.HasContext() && scope_info.HasOuterScopeInfo()) {
-        scope_info = scope_info.OuterScopeInfo(broker());
-      }
-      if (scope_info.HasContext()) {
-        graph()->record_scope_info(GetContext(), scope_info);
-      }
+      CHECK(scope_info.HasContext());
+      graph()->record_scope_info(GetContext(), scope_info);
     }
     if (compilation_unit_->is_osr()) {
       OsrAnalyzePrequel();
@@ -263,8 +259,10 @@ class MaglevGraphBuilder {
   void BuildBody() {
     while (!source_position_iterator_.done() &&
            source_position_iterator_.code_offset() < entrypoint_) {
+      current_source_position_ = SourcePosition(
+          source_position_iterator_.source_position().ScriptOffset(),
+          inlining_id_);
       source_position_iterator_.Advance();
-      UpdateSourceAndBytecodePosition(source_position_iterator_.code_offset());
     }
     for (iterator_.SetOffset(entrypoint_); !iterator_.done();
          iterator_.Advance()) {
@@ -278,6 +276,8 @@ class MaglevGraphBuilder {
       }
       VisitSingleBytecode();
     }
+    DCHECK_EQ(loop_effects_stack_.size(),
+              is_inline() && parent_->loop_effects_ ? 1 : 0);
   }
 
   VirtualObject* CreateVirtualObjectForMerge(compiler::MapRef map,
@@ -375,6 +375,14 @@ class MaglevGraphBuilder {
            v8_flags.maglev_licm;
   }
 
+  bool TopLevelFunctionPassMaglevPrintFilter() {
+    if (parent_) {
+      return parent_->TopLevelFunctionPassMaglevPrintFilter();
+    }
+    return compilation_unit_->shared_function_info().object()->PassesFilter(
+        v8_flags.maglev_print_filter);
+  }
+
   void RecordUseReprHint(Phi* phi, UseRepresentationSet reprs) {
     phi->RecordUseReprHint(reprs, iterator_.current_offset());
   }
@@ -401,8 +409,6 @@ class MaglevGraphBuilder {
 
     MaglevSubGraphBuilder(MaglevGraphBuilder* builder, int variable_count);
     LoopLabel BeginLoop(std::initializer_list<Variable*> loop_vars);
-    // TODO(victorgomes): Change GotoIFXXX to get a lambda returning a
-    // BranchResult.
     template <typename ControlNodeT, typename... Args>
     void GotoIfTrue(Label* true_target,
                     std::initializer_list<ValueNode*> control_inputs,
@@ -419,6 +425,10 @@ class MaglevGraphBuilder {
     V8_NODISCARD ReduceResult TrimPredecessorsAndBind(Label* label);
     void set(Variable& var, ValueNode* value);
     ValueNode* get(const Variable& var) const;
+
+    template <typename FCond, typename FTrue, typename FFalse>
+    ReduceResult Branch(std::initializer_list<Variable*> vars, FCond cond,
+                        FTrue if_true, FFalse if_false);
 
     void MergeIntoLabel(Label* label, BasicBlock* predecessor);
 
@@ -554,13 +564,12 @@ class MaglevGraphBuilder {
     // cached directly on the builder instead of on the merge states.
     ResetBuilderCachedState();
 
-    // TODO(victorgomes:349923027): Remove these checks after bug is fixed.
     if (merge_state.is_loop()) {
-      CHECK_EQ(merge_state.predecessors_so_far(),
-               merge_state.predecessor_count() - 1);
+      DCHECK_EQ(merge_state.predecessors_so_far(),
+                merge_state.predecessor_count() - 1);
     } else {
-      CHECK_EQ(merge_state.predecessors_so_far(),
-               merge_state.predecessor_count());
+      DCHECK_EQ(merge_state.predecessors_so_far(),
+                merge_state.predecessor_count());
     }
 
     if (merge_state.predecessor_count() == 1) return;
@@ -618,6 +627,9 @@ class MaglevGraphBuilder {
   bool IsOffsetAMergePoint(int offset) {
     return merge_states_[offset] != nullptr;
   }
+
+  ValueNode* GetContextAtDepth(ValueNode* context, size_t depth);
+  bool CheckContextExtensions(size_t depth);
 
   // Called when a block is killed by an unconditional eager deopt.
   ReduceResult EmitUnconditionalDeopt(DeoptimizeReason reason) {
@@ -856,13 +868,13 @@ class MaglevGraphBuilder {
   case interpreter::Bytecode::k##name: \
     Visit##name();                     \
     break;
-      BYTECODE_LIST(BYTECODE_CASE)
+      BYTECODE_LIST(BYTECODE_CASE, BYTECODE_CASE)
 #undef BYTECODE_CASE
     }
   }
 
 #define BYTECODE_VISITOR(name, ...) void Visit##name();
-  BYTECODE_LIST(BYTECODE_VISITOR)
+  BYTECODE_LIST(BYTECODE_VISITOR, BYTECODE_VISITOR)
 #undef BYTECODE_VISITOR
 
 #define DECLARE_VISITOR(name, ...) \
@@ -1150,24 +1162,27 @@ class MaglevGraphBuilder {
                        compiler::OptionalScopeInfoRef scope_info);
   enum ContextSlotMutability { kImmutable, kMutable };
   bool TrySpecializeLoadContextSlotToFunctionContext(
-      ValueNode** context, size_t* depth, int slot_index,
+      ValueNode* context, int slot_index,
       ContextSlotMutability slot_mutability);
+  ValueNode* TrySpecializeLoadScriptContextSlot(ValueNode* context, int index);
   ValueNode* LoadAndCacheContextSlot(ValueNode* context, int offset,
-                                     ContextSlotMutability slot_mutability);
-  void StoreAndCacheContextSlot(ValueNode* context, int offset,
-                                ValueNode* value);
+                                     ContextSlotMutability slot_mutability,
+                                     ContextKind context_kind);
+  ReduceResult TrySpecializeStoreScriptContextSlot(ValueNode* context,
+                                                   int index, ValueNode* value,
+                                                   Node** store);
+  ReduceResult StoreAndCacheContextSlot(ValueNode* context, int index,
+                                        ValueNode* value,
+                                        ContextKind context_kind);
   ValueNode* TryGetParentContext(ValueNode* node);
   void MinimizeContextChainDepth(ValueNode** context, size_t* depth);
   void EscapeContext();
   void BuildLoadContextSlot(ValueNode* context, size_t depth, int slot_index,
-                            ContextSlotMutability slot_mutability);
-  void BuildStoreContextSlotHelper(ValueNode* context, size_t depth,
-                                   int slot_index, ValueNode* value,
-                                   bool update_side_data);
-  void BuildStoreContextSlot(ValueNode* context, size_t depth, int slot_index,
-                             ValueNode* value);
-  void BuildStoreScriptContextSlot(ValueNode* context, size_t depth,
-                                   int slot_index, ValueNode* value);
+                            ContextSlotMutability slot_mutability,
+                            ContextKind context_kind);
+  ReduceResult BuildStoreContextSlot(ValueNode* context, size_t depth,
+                                     int slot_index, ValueNode* value,
+                                     ContextKind context_kind);
 
   void BuildStoreMap(ValueNode* object, compiler::MapRef map,
                      StoreMap::Kind kind);
@@ -1246,8 +1261,10 @@ class MaglevGraphBuilder {
   ValueNode* BuildToString(ValueNode* value, ToString::ConversionMode mode);
 
   constexpr bool RuntimeFunctionCanThrow(Runtime::FunctionId function_id) {
-#define BAILOUT(name, ...) \
-  if (function_id == Runtime::k##name) return true;
+#define BAILOUT(name, ...)               \
+  if (function_id == Runtime::k##name) { \
+    return true;                         \
+  }
     FOR_EACH_THROWING_INTRINSIC(BAILOUT)
 #undef BAILOUT
     return false;
@@ -1932,7 +1949,7 @@ class MaglevGraphBuilder {
   V(StringPrototypeCharCodeAt)                 \
   V(StringPrototypeCodePointAt)                \
   V(StringPrototypeIterator)                   \
-  V(StringPrototypeLocaleCompare)              \
+  IF_INTL(V, StringPrototypeLocaleCompareIntl) \
   CONTINUATION_PRESERVED_EMBEDDER_DATA_LIST(V) \
   IEEE_754_UNARY_LIST(V)
 
@@ -2096,6 +2113,7 @@ class MaglevGraphBuilder {
   void BuildCheckHeapObject(ValueNode* object);
   void BuildCheckJSReceiver(ValueNode* object);
   void BuildCheckString(ValueNode* object);
+  void BuildCheckStringOrStringWrapper(ValueNode* object);
   void BuildCheckSymbol(ValueNode* object);
   ReduceResult BuildCheckMaps(ValueNode* object,
                               base::Vector<const compiler::MapRef> maps);
@@ -2120,11 +2138,6 @@ class MaglevGraphBuilder {
   ValueNode* BuildConvertHoleToUndefined(ValueNode* node);
   ReduceResult BuildCheckNotHole(ValueNode* node);
 
-  // Checks whether we're invalidating the constness of a const tracking let
-  // variable, and if yes, deopts.
-  void BuildCheckConstTrackingLetCell(ValueNode* context, ValueNode* value,
-                                      int index);
-
   template <bool flip = false>
   ValueNode* BuildToBoolean(ValueNode* node);
   ValueNode* BuildLogicalNot(ValueNode* value);
@@ -2140,8 +2153,8 @@ class MaglevGraphBuilder {
   void TryBuildStoreTaggedFieldToAllocation(ValueNode* object, ValueNode* value,
                                             int offset);
   template <typename Instruction = LoadTaggedField, typename... Args>
-  ValueNode* BuildLoadTaggedField(ValueNode* object, Args&&... args) {
-    auto offset = std::get<0>(std::make_tuple(args...));
+  ValueNode* BuildLoadTaggedField(ValueNode* object, uint32_t offset,
+                                  Args&&... args) {
     if (offset != HeapObject::kMapOffset &&
         CanTrackObjectChanges(object, TrackObjectMode::kLoad)) {
       VirtualObject* vobject =
@@ -2154,7 +2167,7 @@ class MaglevGraphBuilder {
         DCHECK_EQ(vobject->type(), VirtualObject::kFixedDoubleArray);
         // The only offset we're allowed to read from the a FixedDoubleArray as
         // tagged field is the length.
-        CHECK_EQ(offset, FixedDoubleArray::kLengthOffset);
+        CHECK_EQ(offset, offsetof(FixedDoubleArray, length_));
         value = GetInt32Constant(vobject->double_elements_length());
       }
       if (v8_flags.trace_maglev_object_tracking) {
@@ -2164,7 +2177,8 @@ class MaglevGraphBuilder {
       }
       return value;
     }
-    return AddNewNode<Instruction>({object}, std::forward<Args>(args)...);
+    return AddNewNode<Instruction>({object}, offset,
+                                   std::forward<Args>(args)...);
   }
 
   Node* BuildStoreTaggedField(ValueNode* object, ValueNode* value, int offset,
@@ -2266,14 +2280,14 @@ class MaglevGraphBuilder {
       compiler::AccessMode access_mode,
       GenericAccessFunc&& build_generic_access);
 
+  template <typename GenericAccessFunc>
   ReduceResult TryBuildLoadNamedProperty(
       ValueNode* receiver, ValueNode* lookup_start_object,
-      compiler::NameRef name, compiler::FeedbackSource& feedback_source);
+      compiler::NameRef name, compiler::FeedbackSource& feedback_source,
+      GenericAccessFunc&& build_generic_access);
   ReduceResult TryBuildLoadNamedProperty(
       ValueNode* receiver, compiler::NameRef name,
-      compiler::FeedbackSource& feedback_source) {
-    return TryBuildLoadNamedProperty(receiver, receiver, name, feedback_source);
-  }
+      compiler::FeedbackSource& feedback_source);
 
   ReduceResult BuildLoadTypedArrayLength(ValueNode* object,
                                          ElementsKind elements_kind);
@@ -2736,8 +2750,11 @@ class MaglevGraphBuilder {
         int size = loop_info.loop_end() - loop_info.loop_start();
         if (loop_info.innermost() && !loop_info.resumable() &&
             iterator.next_offset() < loop_info.loop_end() &&
-            size < v8_flags.maglev_loop_peeling_max_size) {
+            size < v8_flags.maglev_loop_peeling_max_size &&
+            size + graph_->total_peeled_bytecode_size() <
+                v8_flags.maglev_loop_peeling_max_size_cumulative) {
           DCHECK(!is_loop_peeling_iteration);
+          graph_->add_peeled_bytecode_size(size);
           is_loop_peeling_iteration = true;
           loop_headers_to_peel_.Add(iterator.current_offset());
           peeled_loop_end = bytecode_analysis().GetLoopEndOffsetForInnermost(

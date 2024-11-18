@@ -117,8 +117,9 @@ class Deoptimizer : public Malloced {
   // potential attacker from using the frame creation process in the
   // deoptimizer, in particular the signing process, to gain control over the
   // program.
-  // When building mksnapshot, always return false.
-  static bool IsValidReturnAddress(Address pc, Isolate* isolate);
+  // This function makes a crash if the address is not valid. If it's valid,
+  // it returns the given address.
+  static Address EnsureValidReturnAddress(Isolate* isolate, Address address);
 
   ~Deoptimizer();
 
@@ -139,6 +140,16 @@ class Deoptimizer : public Malloced {
     return offsetof(Deoptimizer, caller_frame_top_);
   }
 
+#ifdef V8_ENABLE_CET_SHADOW_STACK
+  static constexpr int shadow_stack_offset() {
+    return offsetof(Deoptimizer, shadow_stack_);
+  }
+
+  static constexpr int shadow_stack_count_offset() {
+    return offsetof(Deoptimizer, shadow_stack_count_);
+  }
+#endif  // V8_ENABLE_CET_SHADOW_STACK
+
   Isolate* isolate() const { return isolate_; }
 
   static constexpr int kMaxNumberOfEntries = 16384;
@@ -152,12 +163,19 @@ class Deoptimizer : public Malloced {
   V8_EXPORT_PRIVATE static const int kEagerDeoptExitSize;
   V8_EXPORT_PRIVATE static const int kLazyDeoptExitSize;
 
+  // The size of the call instruction to Builtins::kAdaptShadowStackForDeopt.
+  V8_EXPORT_PRIVATE static const int kAdaptShadowStackOffsetToSubtract;
+
   // Tracing.
   static void TraceMarkForDeoptimization(Isolate* isolate, Tagged<Code> code,
                                          const char* reason);
   static void TraceEvictFromOptimizedCodeCache(Isolate* isolate,
                                                Tagged<SharedFunctionInfo> sfi,
                                                const char* reason);
+
+  // Patch the generated code to jump to a safepoint entry. This is used only
+  // when Shadow Stack is enabled.
+  static void PatchJumpToTrampoline(Address pc, Address new_pc);
 
  private:
   void QueueValueForMaterialization(Address output_address, Tagged<Object> obj,
@@ -175,7 +193,8 @@ class Deoptimizer : public Malloced {
   void DoComputeOutputFramesWasmImpl();
   FrameDescription* DoComputeWasmLiftoffFrame(
       TranslatedFrame& frame, wasm::NativeModule* native_module,
-      Tagged<WasmTrustedInstanceData> wasm_trusted_instance, int frame_index);
+      Tagged<WasmTrustedInstanceData> wasm_trusted_instance, int frame_index,
+      std::stack<intptr_t>& shadow_stack);
 
   void GetWasmStackSlotsCounts(const wasm::FunctionSig* sig,
                                int* parameter_stack_slots,
@@ -269,6 +288,11 @@ class Deoptimizer : public Malloced {
   };
   std::vector<ValueToMaterialize> values_to_materialize_;
   std::vector<ValueToMaterialize> feedback_vector_to_materialize_;
+
+#ifdef V8_ENABLE_CET_SHADOW_STACK
+  intptr_t* shadow_stack_ = nullptr;
+  size_t shadow_stack_count_ = 0;
+#endif  // V8_ENABLE_CET_SHADOW_STACK
 
 #ifdef DEBUG
   DisallowGarbageCollection* disallow_garbage_collection_;

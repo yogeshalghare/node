@@ -273,9 +273,10 @@ class TestCodeEventHandler : public v8::CodeEventHandler {
     std::string name = std::string(code_event->GetComment());
     if (name.empty()) {
       v8::Local<v8::String> functionName = code_event->GetFunctionName();
-      std::string buffer(functionName->Utf8Length(isolate_) + 1, 0);
-      functionName->WriteUtf8(isolate_, &buffer[0],
-                              functionName->Utf8Length(isolate_) + 1);
+      size_t buffer_size = functionName->Utf8LengthV2(isolate_) + 1;
+      std::string buffer(buffer_size, 0);
+      functionName->WriteUtf8V2(isolate_, &buffer[0], buffer_size,
+                                String::WriteFlags::kNullTerminate);
       // Sanitize name, removing unwanted \0 resulted from WriteUtf8
       name = std::string(buffer.c_str());
     }
@@ -945,8 +946,7 @@ void ValidateMapDetailsLogging(v8::Isolate* isolate,
 TEST_F(LogMapsTest, LogMapsDetailsStartup) {
   // Reusing map addresses might cause these tests to fail.
   if (i::v8_flags.gc_global || i::v8_flags.stress_compaction ||
-      i::v8_flags.stress_incremental_marking ||
-      i::v8_flags.enable_third_party_heap) {
+      i::v8_flags.stress_incremental_marking) {
     return;
   }
   // Test that all Map details from Maps in the snapshot are logged properly.
@@ -969,8 +969,7 @@ class LogMapsCodeTest : public LogTest {
 TEST_F(LogMapsCodeTest, LogMapsDetailsCode) {
   // Reusing map addresses might cause these tests to fail.
   if (i::v8_flags.gc_global || i::v8_flags.stress_compaction ||
-      i::v8_flags.stress_incremental_marking ||
-      i::v8_flags.enable_third_party_heap) {
+      i::v8_flags.stress_incremental_marking) {
     return;
   }
 
@@ -1059,8 +1058,7 @@ TEST_F(LogMapsCodeTest, LogMapsDetailsCode) {
 TEST_F(LogMapsTest, LogMapsDetailsContexts) {
   // Reusing map addresses might cause these tests to fail.
   if (i::v8_flags.gc_global || i::v8_flags.stress_compaction ||
-      i::v8_flags.stress_incremental_marking ||
-      i::v8_flags.enable_third_party_heap) {
+      i::v8_flags.stress_incremental_marking) {
     return;
   }
   // Test that all Map details from Maps in the snapshot are logged properly.
